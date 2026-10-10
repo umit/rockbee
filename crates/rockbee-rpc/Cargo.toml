@@ -1,0 +1,18 @@
+[package]
+name = "rockbee-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bounded TCP RPC server used by Rockbee nodes and gateway"
+
+[lints]
+workspace = true
+
+[dependencies]
+rockbee-protocol = { path = "../rockbee-protocol" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+rockbee-client = { path = "../rockbee-client" }
+tempfile = { version = "3", default-features = false }

@@ -1,0 +1,25 @@
+[package]
+name = "rockbee-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rockbee command-line client"
+default-run = "rockbee-client"
+
+[[bin]]
+name = "rockbee-client"
+path = "src/main.rs"
+
+[[bin]]
+name = "rockbee-local"
+path = "src/bin/rockbee-local.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+rockbee-client = { path = "../../crates/rockbee-client" }
+rockbee-protocol = { path = "../../crates/rockbee-protocol" }
+tokio = { workspace = true }
+serde_json = "1"

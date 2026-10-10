@@ -1,0 +1,22 @@
+[package]
+name = "rockbee-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rockbee stateless gateway: writes to writer, reads from readers"
+
+[lints]
+workspace = true
+
+[dependencies]
+rockbee-protocol = { path = "../../crates/rockbee-protocol" }
+rockbee-rpc = { path = "../../crates/rockbee-rpc" }
+tokio = { workspace = true }
+serde_json = "1"
+
+[dev-dependencies]
+rockbee-client = { path = "../../crates/rockbee-client" }
+slatedb = { version = "=0.17.0", features = ["aws"] }
+rockbee-node = { path = "../../crates/rockbee-node" }
+tempfile = { version = "3", default-features = false }

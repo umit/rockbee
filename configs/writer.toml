@@ -1,0 +1,29 @@
+# Rockbee writer. Start this before readers using the SAME bucket/prefix.
+# Start: rockbee-writer --config configs/writer.toml
+role = "writer"
+addr = "127.0.0.1:7101"
+backend = "localstack"
+endpoint = "http://127.0.0.1:4566"
+bucket = "rockbee-test"
+prefix = "rockbee-dev"
+
+[rpc]
+max_connections = 256
+global_max_in_flight = 128
+read_timeout_ms = 30000
+write_timeout_ms = 5000
+
+[memory]
+# Same defaults as reader.toml, independently allocated per engine/process.
+block_cache_bytes = 536870912
+metadata_cache_bytes = 134217728
+block_cache_shards = "auto"
+metadata_cache_shards = "auto"
+# Reader-only; shown for completeness, unused by this writer.
+reader_max_memtable_bytes = 67108864
+# Must be greater than SlateDB's default 64 MiB L0 SST threshold.
+# This limits unflushed-data growth through backpressure, not total process RSS.
+writer_max_unflushed_bytes = 1073741824
+
+# LRU, WAL flush 100 ms, compaction and Tokio/TCP settings retain their defaults.
+# PUT/DELETE ACK still waits for durability. No allocator/disk-cache override.

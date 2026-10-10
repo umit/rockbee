@@ -1,0 +1,20 @@
+[package]
+name = "rockbee-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Async byte client with multiplexed TCP"
+
+[lints]
+workspace = true
+
+[dependencies]
+rockbee-protocol = { path = "../rockbee-protocol" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+libc = "0.2"
+serde_json = "1"
+sha2 = "0.10"

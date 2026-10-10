@@ -1,0 +1,32 @@
+[workspace]
+members = [
+  "crates/rockbee-protocol",
+  "crates/rockbee-client",
+  "crates/rockbee-rpc",
+  "crates/rockbee-node",
+  "apps/rockbee-gateway",
+  "apps/rockbee-writer",
+  "apps/rockbee-reader",
+  "tools/rockbee-cli",
+  "tools/rockbee-cdc",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/umit/rockbee"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "signal", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+
+# Shared with SlateDB's workspace coding standards.
+[workspace.lints.rust]
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+panic = "warn"

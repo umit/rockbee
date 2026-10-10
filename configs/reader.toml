@@ -1,0 +1,48 @@
+# Rockbee reader. Same bucket/prefix as writer.toml; load once at startup.
+# Start: rockbee-reader --config configs/reader.toml
+# Inspect without opening storage: add --check-config
+role = "reader"
+addr = "127.0.0.1:7102"
+backend = "localstack"
+endpoint = "http://127.0.0.1:4566"
+bucket = "rockbee-test"
+prefix = "rockbee-dev"
+# For backend = "file": remove endpoint/bucket and set directory = "./objects".
+# For backend = "s3": remove endpoint; credentials come from the environment.
+
+[rpc]
+max_connections = 256
+global_max_in_flight = 128
+read_timeout_ms = 30000
+write_timeout_ms = 5000
+
+[reader]
+# SlateDB checks durable manifest and WAL changes at this interval. Its pinned
+# default is 10 s. Lower values reduce eventual-read visibility delay but add
+# object-store requests. It must be positive and cannot exceed 300000 ms while
+# using SlateDB's default 600 s managed-checkpoint lifetime.
+poll_interval_ms = 10000
+
+[memory]
+# All knobs exposed by SlateDB 0.17.0's in-memory Foyer adapter:
+# capacity and shards, separately for decoded SST data and SST metadata.
+# Values preserve SlateDB defaults. Bytes, not preallocated memory or RSS limits.
+block_cache_bytes = 536870912        # 512 MiB: decoded SST data blocks
+metadata_cache_bytes = 134217728     # 128 MiB: index, Bloom filter, stats
+block_cache_shards = "auto"          # detected logical CPUs, or positive integer
+metadata_cache_shards = "auto"       # lock partitioning within this process
+
+# Reader: maximum size of ONE replay memtable, not all replay memory combined.
+reader_max_memtable_bytes = 67108864 # 64 MiB
+# Writer-only; shown for a complete memory schema, unused by this reader.
+# Must exceed SlateDB's default 64 MiB L0 SST threshold.
+writer_max_unflushed_bytes = 1073741824 # 1 GiB; unflushed-data backpressure
+
+# Pinned Foyer 0.22.6 uses LRU. SlateDB's RAM adapter exposes no eviction-policy
+# selector. Cache-fill coalescing and its byte weigher are fixed by the adapter.
+# Foyer hybrid disk caching and SlateDB's separate local object-store disk cache
+# are not enabled. No JVM/off-heap or jemalloc runtime switch exists here.
+# Reader managed-checkpoint lifetime remains SlateDB's 600 s default; WAL replay
+# stays enabled. Cache hits do not make reader freshness immediate.
+# Total container RAM is set by ROCKBEE_READER_MEMORY_LIMIT in compose.reader.yaml,
+# not by this file. Native macOS runs have no application-imposed hard RSS limit.

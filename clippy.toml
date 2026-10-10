@@ -1,0 +1,3 @@
+# Match SlateDB's policy: explicit failures in production, test assertions allowed.
+allow-unwrap-in-tests = true
+allow-panic-in-tests = true

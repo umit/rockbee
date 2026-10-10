@@ -1,0 +1,23 @@
+name: rockbee-reader
+
+services:
+  reader:
+    image: rockbee-reader:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_JOBS: ${ROCKBEE_READER_BUILD_JOBS:-2}
+    ports:
+      - "127.0.0.1:${ROCKBEE_READER_PORT:-7102}:7102"
+    volumes:
+      - ${ROCKBEE_READER_CONFIG:-./configs/reader.toml}:/etc/rockbee/server.toml:ro
+    command:
+      - --config
+      - /etc/rockbee/server.toml
+      - --addr
+      - 0.0.0.0:7102
+      - --endpoint
+      - http://host.docker.internal:4566
+    mem_limit: ${ROCKBEE_READER_MEMORY_LIMIT:-2g}
+    memswap_limit: ${ROCKBEE_READER_MEMORY_LIMIT:-2g}

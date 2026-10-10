@@ -1,0 +1,26 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential cmake perl pkg-config
+      - name: Install Rust
+        # rustup installs the toolchain and components from rust-toolchain.toml.
+        run: rustup show active-toolchain
+      - name: Format, lint, and Rust tests
+        run: make verify

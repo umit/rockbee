@@ -1,0 +1,34 @@
+name: rockbee-localstack
+
+services:
+  localstack:
+    # Last community release before the authenticated image distribution.
+    # https://github.com/localstack/localstack/releases/tag/v4.14.0
+    image: localstack/localstack:4.14.0
+    ports:
+      - "127.0.0.1:4566:4566"
+    environment:
+      SERVICES: s3
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    volumes:
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/rockbee.sh:ro
+    healthcheck:
+      # Check the bucket, not just the HTTP port: the ready hook must finish first.
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - --head
+        - --aws-sigv4
+        - aws:amz:us-east-1:s3
+        - --user
+        - test:test
+        - http://127.0.0.1:4566/rockbee-test
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s

@@ -1,0 +1,54 @@
+syntax = "proto3";
+package rockbee.v1;
+option java_package = "io.rockbee.protocol.v1";
+option java_multiple_files = true;
+
+// Common encoding for the public Client and internal Upstream APIs.
+// Positive IDs correlate multiplexed calls; zero reserves sequential mode.
+message Envelope {
+  uint32 version = 1;
+  uint64 request_id = 2;
+  oneof message {
+    Put put = 10;
+    Get get = 11;
+    Delete delete = 12;
+    PutWithTtl put_with_ttl = 13;
+    Status status = 14;
+    Ok ok = 20;
+    Value value = 21;
+    Error error = 22;
+    StatusSnapshot status_snapshot = 23;
+  }
+}
+message Put { bytes key = 1; bytes value = 2; }
+message PutWithTtl { bytes key = 1; bytes value = 2; uint64 ttl_millis = 3; }
+message Get { bytes key = 1; }
+message Delete { bytes key = 1; }
+message Status {}
+message Ok {}
+// Absent means missing; present empty bytes means a stored empty value.
+message Value { optional bytes value = 1; }
+// Missing, zero or unrecognized values never prove a mutation was rejected.
+enum MutationOutcome {
+  MUTATION_OUTCOME_UNKNOWN = 0;
+  MUTATION_OUTCOME_REJECTED = 1;
+}
+message Error {
+  string message = 1;
+  MutationOutcome mutation_outcome = 2;
+}
+enum ServiceRole {
+  SERVICE_ROLE_UNSPECIFIED = 0;
+  SERVICE_ROLE_WRITER = 1;
+  SERVICE_ROLE_READER = 2;
+  SERVICE_ROLE_GATEWAY = 3;
+}
+message StatusSnapshot {
+  ServiceRole role = 1;
+  uint64 connections_current = 2;
+  uint64 connections_accepted_total = 3;
+  uint64 connections_rejected_total = 4;
+  uint64 connections_failed_total = 5;
+  uint64 requests_completed_total = 6;
+  uint64 error_responses_total = 7;
+}

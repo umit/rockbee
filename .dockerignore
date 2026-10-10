@@ -1,0 +1,9 @@
+*
+!Cargo.toml
+!Cargo.lock
+!apps
+!apps/**
+!tools
+!tools/**
+!crates
+!crates/**

@@ -1,0 +1,12 @@
+/target/
+/.herdr/
+/.idea/
+/data/
+/.cargo-home/
+/.venv/
+__pycache__/
+/objects/
+/reports/
+/docs/
+/slate-experiment-report.json
+/gateway-experiment-report.json

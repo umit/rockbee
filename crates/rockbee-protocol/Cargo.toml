@@ -1,0 +1,20 @@
+[package]
+name = "rockbee-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rockbee Protobuf messages, bounded framing and shared multiplexed TCP transport"
+
+[lints]
+workspace = true
+
+[dependencies]
+prost = "0.14"
+serde = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+prost-build = "0.14"
