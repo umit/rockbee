@@ -21,6 +21,8 @@ repository = "https://github.com/umit/rockbee"
 [workspace.dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "signal", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "tracing-log"] }
 
 # Shared with SlateDB's workspace coding standards.
 [workspace.lints.rust]

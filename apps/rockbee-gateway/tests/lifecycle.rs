@@ -77,6 +77,9 @@ fn command(address: &str) -> Command {
             "--reader",
             "127.0.0.1:2",
         ])
+        // Each test owns its logging configuration instead of inheriting the
+        // developer's shell setting.
+        .env_remove("RUST_LOG")
         .stdin(Stdio::null());
     command
 }
@@ -153,9 +156,56 @@ fn gateway_emits_ready_then_stopped_for_sigterm() -> Result<()> {
     assert_eq!(stopped["reason"], "shutdown_signal");
     assert!(stopped["uptime_ms"].is_u64());
     assert_no_more_events(&events)?;
+    let stderr = process.stderr()?;
     assert!(
-        process.stderr()?.is_empty(),
-        "banner or error reached piped stderr"
+        stderr.contains("service ready"),
+        "missing ready log: {stderr}"
+    );
+    assert!(
+        stderr.contains("service stopped"),
+        "missing stopped log: {stderr}"
+    );
+    assert!(
+        !stderr.contains("\u{1b}["),
+        "ANSI reached piped stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("ROCKBEE"),
+        "terminal banner reached piped stderr: {stderr}"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn gateway_rust_log_off_mutes_diagnostics_without_changing_lifecycle_stdout() -> Result<()> {
+    let mut command = command("127.0.0.1:0");
+    command.env("RUST_LOG", "off");
+    let mut child = OwnedChild {
+        child: command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+    };
+    let stdout = child.child.stdout.take().ok_or("missing gateway stdout")?;
+    let (sent, events) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if sent.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let ready = next_event(&events)?;
+    assert_eq!(ready["event"], "ready");
+    child.terminate()?;
+    let stopped = next_event(&events)?;
+    assert_eq!(stopped["event"], "stopped");
+    assert_no_more_events(&events)?;
+    assert!(
+        child.stderr()?.is_empty(),
+        "RUST_LOG=off emitted diagnostics"
     );
     Ok(())
 }
@@ -193,5 +243,63 @@ fn gateway_bind_failure_emits_failed_without_ready() -> Result<()> {
     );
     assert!(events.iter().all(|event| event["event"] != "ready"));
     assert!(events.iter().all(|event| event["event"] != "stopped"));
+    Ok(())
+}
+
+#[test]
+fn gateway_rejects_invalid_rust_log_before_binding() -> Result<()> {
+    let occupied = TcpListener::bind("127.0.0.1:0")?;
+    let address = occupied.local_addr()?.to_string();
+    let mut child = OwnedChild {
+        child: command(&address)
+            .env("RUST_LOG", "rockbee=bogus")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+    };
+    let status = wait_for_exit(&mut child.child)?;
+    assert!(!status.success());
+
+    let mut stdout = String::new();
+    child
+        .child
+        .stdout
+        .take()
+        .ok_or("missing gateway stdout")?
+        .read_to_string(&mut stdout)?;
+    assert!(
+        stdout.is_empty(),
+        "invalid RUST_LOG emitted stdout: {stdout}"
+    );
+    let mut stderr = String::new();
+    child
+        .child
+        .stderr
+        .take()
+        .ok_or("missing gateway stderr")?
+        .read_to_string(&mut stderr)?;
+    assert!(
+        stderr.contains("RUST_LOG"),
+        "missing filter error: {stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn gateway_help_and_check_config_do_not_parse_rust_log() -> Result<()> {
+    let help = Command::new(env!("CARGO_BIN_EXE_rockbee-gateway"))
+        .arg("--help")
+        .env("RUST_LOG", "rockbee=bogus")
+        .output()?;
+    assert!(help.status.success(), "help failed: {help:?}");
+
+    let check_config = command("127.0.0.1:0")
+        .arg("--check-config")
+        .env("RUST_LOG", "rockbee=bogus")
+        .output()?;
+    assert!(
+        check_config.status.success(),
+        "check-config failed: {check_config:?}"
+    );
     Ok(())
 }

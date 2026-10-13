@@ -15,6 +15,7 @@ serde = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 prost-build = "0.14"

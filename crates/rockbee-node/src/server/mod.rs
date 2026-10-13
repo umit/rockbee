@@ -122,28 +122,42 @@ impl Server {
 }
 
 async fn handle_request(store: &Store, request: Request) -> Result<Response> {
-    match request {
-        Request::Put { key, value } => {
-            store.put(&key, &value).await?;
-            Ok(Response::Ok)
+    let operation = match &request {
+        Request::Put { .. } => "put",
+        Request::PutWithTtl { .. } => "put_with_ttl",
+        Request::Get { .. } => "get",
+        Request::Delete { .. } => "delete",
+        Request::Status => "status",
+    };
+    let result = async {
+        match request {
+            Request::Put { key, value } => {
+                store.put(&key, &value).await?;
+                Ok(Response::Ok)
+            }
+            Request::PutWithTtl {
+                key,
+                value,
+                ttl_millis,
+            } => {
+                store.put_with_ttl(&key, &value, ttl_millis).await?;
+                Ok(Response::Ok)
+            }
+            Request::Get { key } => Ok(Response::Value {
+                value: store.get(&key).await?,
+            }),
+            Request::Delete { key } => {
+                store.delete(&key).await?;
+                Ok(Response::Ok)
+            }
+            Request::Status => Err("Status must be handled locally by RPC".into()),
         }
-        Request::PutWithTtl {
-            key,
-            value,
-            ttl_millis,
-        } => {
-            store.put_with_ttl(&key, &value, ttl_millis).await?;
-            Ok(Response::Ok)
-        }
-        Request::Get { key } => Ok(Response::Value {
-            value: store.get(&key).await?,
-        }),
-        Request::Delete { key } => {
-            store.delete(&key).await?;
-            Ok(Response::Ok)
-        }
-        Request::Status => Err("Status must be handled locally by RPC".into()),
     }
+    .await;
+    if let Err(error) = &result {
+        tracing::warn!(operation, role = ?store.role(), error = %error, "storage request failed");
+    }
+    result
 }
 
 fn service_role(role: crate::storage::Role) -> ServiceRole {

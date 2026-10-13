@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
+use tracing::{debug, warn};
 
 pub struct RpcServer {
     listener: TcpListener,
@@ -68,14 +69,16 @@ impl RpcServer {
                 }
                 accepted = self.listener.accept() => {
                     match accepted {
-                        Ok((stream, _)) => {
+                        Ok((stream, peer)) => {
                             let Ok(permit) = slots.clone().try_acquire_owned() else {
                                 // No decoded request or ID exists yet. Close without replying,
                                 // queueing a socket or spawning a waiting connection task.
+                                debug!(%peer, "rpc connection rejected: connection limit reached");
                                 drop(stream);
                                 stats.rejected_connection();
                                 continue;
                             };
+                            debug!(%peer, "rpc connection accepted");
                             let handler = Arc::clone(&handler);
                             let stop = stop_connections.subscribe();
                             let config = self.config;
@@ -107,11 +110,11 @@ fn report_connection(
     match finished {
         Ok(Err(error)) => {
             stats.failed_connection();
-            eprintln!("Connection failed: {error}");
+            warn!(error = %error, "rpc connection failed");
         }
         Err(error) => {
             stats.failed_connection();
-            eprintln!("Connection task failed: {error}");
+            warn!(error = %error, "rpc connection task failed");
         }
         _ => {}
     }

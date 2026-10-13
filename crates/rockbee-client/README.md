@@ -73,6 +73,14 @@ calculates expiry using its clock, and readers filter expired values when
 reading. Expiry is logical visibility, not immediate physical object deletion.
 See [how it works](../../README.md#how-it-works) for the eventual reader model.
 
+## Diagnostics
+
+The Client and its TCP transport emit `tracing` diagnostics without installing
+a global subscriber. Configure `tracing-subscriber` in your application's entry
+point to view them. With its `env-filter` support enabled, a filter such as
+`RUST_LOG=warn,rockbee_client=debug,rockbee_protocol=debug` shows client shutdown
+and connection events. Successful requests and key/value contents are not logged.
+
 ## Graceful shutdown
 
 `shutdown` closes admission for this `Client` and every clone when its future is

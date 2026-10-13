@@ -238,6 +238,25 @@ An ASCII Rockbee banner appears on stderr when starting in a terminal, including
 with `make local`. It is omitted from captured stderr, `--help`, and
 `--check-config`, keeping machine-readable stdout intact.
 
+Diagnostic logs use `tracing` and go to stderr as timestamped text. By default,
+Rockbee emits `INFO` and above; SlateDB and other dependencies emit `WARN` and
+above (`warn,rockbee=info`). Set `RUST_LOG` before starting a service to replace
+that filter:
+
+```sh
+RUST_LOG=warn,rockbee=debug,slatedb=info make local
+RUST_LOG=off make gateway
+```
+
+The first command includes TCP connection diagnostics and SlateDB's informational
+events. The second disables diagnostic logs; stdout lifecycle events and the
+terminal banner remain. Invalid filters fail before the service binds or opens
+storage. `--help` and `--check-config` do not initialize logging. The local
+launcher saves each child service's stderr in its printed log directory.
+Successful GET/PUT/DELETE requests are not logged individually, and Rockbee's
+diagnostics do not record their keys or values. The public Rust Client emits
+diagnostic events but leaves subscriber setup to the application that uses it.
+
 The reader's `[reader].poll_interval_ms` setting in
 [configs/reader.toml](configs/reader.toml) controls how often SlateDB checks for
 durable updates. It defaults to `10000` (10 seconds). A shorter interval adds

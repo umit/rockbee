@@ -5,6 +5,8 @@ use std::io::{IsTerminal, Write};
 use std::time::Instant;
 
 /// Runs a writer or reader executable whose storage role is fixed by its package.
+/// Installs the process-wide tracing subscriber after help/config validation.
+/// Embedding applications should configure logging themselves and use [`Server`].
 pub async fn run_for_role(role: Role, args: impl IntoIterator<Item = String>) -> Result<()> {
     let Some(config) = config::Config::parse_for_role(role, args)? else {
         println!("{}", config::usage_for_role(role));
@@ -14,6 +16,7 @@ pub async fn run_for_role(role: Role, args: impl IntoIterator<Item = String>) ->
 }
 
 /// Temporary compatibility runner for the legacy `rockbee-server --role …` binary.
+/// Like [`run_for_role`], this entry point owns process-wide logging setup.
 pub async fn run_compat(args: impl IntoIterator<Item = String>) -> Result<()> {
     let Some(config) = config::Config::parse(args)? else {
         println!("{}", config::USAGE);
@@ -30,6 +33,7 @@ async fn run_config(config: config::Config) -> Result<()> {
         );
         return Ok(());
     }
+    init_logging()?;
     let started = Instant::now();
     let rpc = config.rpc;
     let memory = config.memory.clone();
@@ -37,6 +41,7 @@ async fn run_config(config: config::Config) -> Result<()> {
         Role::Writer => ("writer", "writer-current"),
         Role::Reader => ("reader", "reader-eventual"),
     };
+    tracing::info!(role, addr = %config.address, "service starting");
     // Keep machine-readable stdout intact, including when a supervisor captures it.
     if std::io::stderr().is_terminal() {
         let _ = writeln!(
@@ -61,6 +66,7 @@ async fn run_config(config: config::Config) -> Result<()> {
                     "rpc_write_timeout_ms": rpc.write_timeout().as_millis() as u64,
                     "memory": memory, "startup_ms": started.elapsed().as_secs_f64() * 1000.0,
                 }));
+                tracing::info!(role, addr = %address, "service ready");
             })
             .await
     }
@@ -73,8 +79,19 @@ async fn run_config(config: config::Config) -> Result<()> {
         "phase": if ready { "serving" } else { "startup" },
     });
     match &result {
-        Ok(()) => stopped["reason"] = "shutdown_signal".into(),
-        Err(error) => stopped["error"] = error.to_string().into(),
+        Ok(()) => {
+            stopped["reason"] = "shutdown_signal".into();
+            tracing::info!(role, addr = %address,
+                uptime_ms = started.elapsed().as_secs_f64() * 1000.0,
+                reason = "shutdown_signal", "service stopped");
+        }
+        Err(error) => {
+            stopped["error"] = error.to_string().into();
+            tracing::error!(role, addr = %address,
+                phase = if ready { "serving" } else { "startup" },
+                uptime_ms = started.elapsed().as_secs_f64() * 1000.0,
+                error = %error, "service failed");
+        }
     }
     // Server::run has already drained RPC owners and attempted to close storage.
     event(&stopped);
@@ -85,4 +102,24 @@ fn event(value: &serde_json::Value) {
     // A supervisor may close its readiness pipe. Logging must not turn a clean
     // shutdown into a panic or replace the original service error.
     let _ = writeln!(std::io::stdout().lock(), "{value}");
+}
+
+// Only the executable entry points call this. Store/Server and the public client
+// leave subscriber ownership to their embedding application.
+fn init_logging() -> Result<()> {
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(value) => tracing_subscriber::EnvFilter::try_new(value)
+            .map_err(|error| format!("invalid RUST_LOG: {error}"))?,
+        Err(std::env::VarError::NotPresent) => {
+            tracing_subscriber::EnvFilter::new("warn,rockbee=info")
+        }
+        Err(error) => return Err(format!("invalid RUST_LOG: {error}").into()),
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .compact()
+        .try_init()?;
+    Ok(())
 }

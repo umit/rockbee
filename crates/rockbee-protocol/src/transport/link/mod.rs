@@ -11,6 +11,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
+use tracing::{debug, warn};
 
 pub struct Link {
     address: String,
@@ -61,6 +62,7 @@ impl Link {
     pub async fn disconnect(&self) {
         let mut slot = self.connection.lock().await;
         if let Some(connection) = slot.as_ref() {
+            debug!(endpoint = %self.address, "upstream transport disconnecting");
             connection.stop().await;
         }
         *slot = None;
@@ -72,9 +74,24 @@ impl Link {
         if let Some(link) = slot.as_ref().filter(|link| !link.is_closed()) {
             return Ok(link.clone());
         }
-        let stream = timeout_at(deadline, TcpStream::connect(&self.address)).await??;
-        let link = Arc::new(Connection::new(stream, self.capacity));
+        let stream = match timeout_at(deadline, TcpStream::connect(&self.address)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                warn!(endpoint = %self.address, error = %error, "upstream transport connection failed");
+                return Err(error.into());
+            }
+            Err(error) => {
+                debug!(endpoint = %self.address, "upstream transport connection timed out");
+                return Err(error.into());
+            }
+        };
+        let link = Arc::new(Connection::with_address(
+            stream,
+            self.address.clone(),
+            self.capacity,
+        ));
         *slot = Some(link.clone());
+        debug!(endpoint = %self.address, "upstream transport connected");
         Ok(link)
     }
 
@@ -216,7 +233,12 @@ struct Connection {
     tasks: tokio::sync::Mutex<[Option<JoinHandle<()>>; 2]>,
 }
 impl Connection {
+    #[cfg(test)]
     fn new(stream: TcpStream, capacity: usize) -> Self {
+        Self::with_address(stream, "<unknown>".to_owned(), capacity)
+    }
+
+    fn with_address(stream: TcpStream, address: String, capacity: usize) -> Self {
         let (input, mut output) = stream.into_split();
         let (retired, mut read_stop) = watch::channel(false);
         let mut write_stop = read_stop.clone();
@@ -230,6 +252,7 @@ impl Connection {
         });
         let (send, mut frames) = mpsc::channel::<Vec<u8>>(capacity);
         let writer_state = shared.clone();
+        let writer_address = address.clone();
         let writer = tokio::spawn(async move {
             let write = async {
                 while let Some(frame) = frames.recv().await {
@@ -242,12 +265,17 @@ impl Connection {
                 biased;
                 _ = write_stop.changed() => {},
                 result = write => {
+                    if result.is_err() {
+                        // Do not include the I/O text: it can contain untrusted peer data.
+                        warn!(endpoint = %writer_address, "upstream transport writer stopped");
+                    }
                     writer_state.retire(&format!("upstream writer stopped: {result:?}"));
                 }
             }
             // A canceled partial write is discarded with this socket, never resumed elsewhere.
         });
         let reader_state = shared.clone();
+        let reader_address = address.clone();
         let reader = tokio::spawn(async move {
             let read = async {
                 let mut input = FrameReader::new(input);
@@ -279,6 +307,11 @@ impl Connection {
                 _ = read_stop.changed() => {},
                 result = read => {
                     let result: Result<()> = result;
+                    if result.is_err() {
+                        // Decode and validation errors may reflect peer input, so log only the
+                        // local endpoint and the event.
+                        warn!(endpoint = %reader_address, "upstream transport reader stopped");
+                    }
                     reader_state.retire(&format!("upstream reader stopped: {result:?}"));
                 }
             }

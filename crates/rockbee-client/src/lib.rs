@@ -128,8 +128,10 @@ impl Client {
     /// Call `shutdown` again to finish draining and disconnecting. Keep the
     /// connect runtime running until shutdown completes; it is not stopped here.
     pub async fn shutdown(&self) {
+        tracing::debug!("client shutdown started");
         self.lifecycle.drain().await;
         self.link.disconnect().await;
+        tracing::debug!("client shutdown completed");
     }
 
     pub async fn connect(address: &str) -> Result<Self> {

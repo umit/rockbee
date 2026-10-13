@@ -19,9 +19,11 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    init_logging()?;
     let started = Instant::now();
     let reader_count = config.readers.len();
     let rpc = config.rpc;
+    tracing::info!(role = "gateway", addr = %config.address, reader_count, "service starting");
     if std::io::stderr().is_terminal() {
         let _ = writeln!(
             std::io::stderr().lock(),
@@ -52,6 +54,7 @@ async fn main() -> Result<()> {
                     "rpc_write_timeout_ms": rpc.write_timeout().as_millis() as u64,
                     "startup_ms": started.elapsed().as_secs_f64() * 1000.0,
                 }));
+                tracing::info!(role = "gateway", addr = %address, "service ready");
             })
             .await
     }
@@ -64,8 +67,19 @@ async fn main() -> Result<()> {
         "phase": if ready { "serving" } else { "startup" },
     });
     match &result {
-        Ok(()) => stopped["reason"] = "shutdown_signal".into(),
-        Err(error) => stopped["error"] = error.to_string().into(),
+        Ok(()) => {
+            stopped["reason"] = "shutdown_signal".into();
+            tracing::info!(role = "gateway", addr = %address,
+                uptime_ms = started.elapsed().as_secs_f64() * 1000.0,
+                reason = "shutdown_signal", "service stopped");
+        }
+        Err(error) => {
+            stopped["error"] = error.to_string().into();
+            tracing::error!(role = "gateway", addr = %address,
+                phase = if ready { "serving" } else { "startup" },
+                uptime_ms = started.elapsed().as_secs_f64() * 1000.0,
+                error = %error, "service failed");
+        }
     }
     event(&stopped);
     result
@@ -74,4 +88,22 @@ async fn main() -> Result<()> {
 fn event(value: &serde_json::Value) {
     // Logging must not panic if a supervisor closes the readiness pipe.
     let _ = writeln!(std::io::stdout().lock(), "{value}");
+}
+
+fn init_logging() -> Result<()> {
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(value) => tracing_subscriber::EnvFilter::try_new(value)
+            .map_err(|error| format!("invalid RUST_LOG: {error}"))?,
+        Err(std::env::VarError::NotPresent) => {
+            tracing_subscriber::EnvFilter::new("warn,rockbee=info")
+        }
+        Err(error) => return Err(format!("invalid RUST_LOG: {error}").into()),
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .compact()
+        .try_init()?;
+    Ok(())
 }

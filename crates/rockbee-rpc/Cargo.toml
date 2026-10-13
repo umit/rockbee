@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 rockbee-protocol = { path = "../rockbee-protocol" }
 tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 rockbee-client = { path = "../rockbee-client" }
