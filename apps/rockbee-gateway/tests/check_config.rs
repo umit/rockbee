@@ -40,6 +40,10 @@ fn check_config_prints_effective_settings_without_binding_or_connecting() -> Res
                 "64",
                 "--upstream-max-pending",
                 "32",
+                "--upstream-request-timeout-ms",
+                "2400",
+                "--upstream-reader-attempt-timeout-ms",
+                "350",
                 "--rpc-max-connections",
                 "17",
                 "--rpc-global-max-in-flight",
@@ -85,7 +89,10 @@ fn check_config_prints_effective_settings_without_binding_or_connecting() -> Res
         serde_json::json!({
             "role": "gateway", "addr": address, "writer": writer_address,
             "readers": [reader_address], "check_config": true,
-            "upstream": { "max_in_flight": 64, "max_pending": 32 },
+            "upstream": {
+                "max_in_flight": 64, "max_pending": 32,
+                "request_timeout_ms": 2400, "reader_attempt_timeout_ms": 350,
+            },
             "rpc": {
                 "max_connections": 17, "global_max_in_flight": 8,
                 "read_timeout_ms": 2000, "write_timeout_ms": 3000,
@@ -125,6 +132,8 @@ readers = ["{reader_address}"]
 [upstream]
 max_in_flight = 64
 max_pending = 32
+request_timeout_ms = 2400
+reader_attempt_timeout_ms = 350
 
 [rpc]
 max_connections = 17
@@ -174,7 +183,10 @@ write_timeout_ms = 3000
         serde_json::json!({
             "role": "gateway", "addr": address, "writer": writer_address,
             "readers": [reader_address], "check_config": true,
-            "upstream": { "max_in_flight": 64, "max_pending": 32 },
+            "upstream": {
+                "max_in_flight": 64, "max_pending": 32,
+                "request_timeout_ms": 2400, "reader_attempt_timeout_ms": 350,
+            },
             "rpc": {
                 "max_connections": 17, "global_max_in_flight": 8,
                 "read_timeout_ms": 2000, "write_timeout_ms": 3000,

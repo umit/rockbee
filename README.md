@@ -210,6 +210,18 @@ file reader list. Unknown TOML fields are rejected. Explicit Make overrides
 such as `make gateway READER_ADDR=127.0.0.1:7202` still work and replace that
 list with the supplied reader. Configuration is loaded once at startup.
 
+Gateway `[upstream]` routing uses a 5000 ms total request deadline after local
+validation, including upstream queueing, connection, and reply time. Intermediate
+reader attempts for `GET` are capped at 1000 ms; an attempt never exceeds the
+time left, while the last or only reader gets the full remaining deadline. Set
+positive millisecond values with `request_timeout_ms` and
+`reader_attempt_timeout_ms`, or `--upstream-request-timeout-ms` and
+`--upstream-reader-attempt-timeout-ms`.
+These routing deadlines are separate from RPC frame timeouts, and a client
+timeout independently limits its observed wait. They do not promise fresh reads;
+a timeout does not guarantee cancellation of a mutation already sent to the
+writer; mutations are never automatically retried.
+
 Query one running service with the command-line client:
 
 ```sh

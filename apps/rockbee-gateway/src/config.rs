@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub const USAGE: &str = "Usage: rockbee-gateway [--addr HOST:PORT] [--writer HOST:PORT] [--reader HOST:PORT ...] [--upstream-max-in-flight COUNT] [--upstream-max-pending COUNT] [--rpc-max-connections COUNT] [--rpc-global-max-in-flight COUNT] [--rpc-read-timeout-ms MILLISECONDS] [--rpc-write-timeout-ms MILLISECONDS] [--config PATH] [--check-config]";
+pub const USAGE: &str = "Usage: rockbee-gateway [--addr HOST:PORT] [--writer HOST:PORT] [--reader HOST:PORT ...] [--upstream-max-in-flight COUNT] [--upstream-max-pending COUNT] [--upstream-request-timeout-ms MILLISECONDS] [--upstream-reader-attempt-timeout-ms MILLISECONDS] [--rpc-max-connections COUNT] [--rpc-global-max-in-flight COUNT] [--rpc-read-timeout-ms MILLISECONDS] [--rpc-write-timeout-ms MILLISECONDS] [--config PATH] [--check-config]";
 
 pub struct Config {
     pub address: String,
@@ -42,6 +42,15 @@ impl Config {
                 }
                 "--upstream-max-pending" if cli.max_pending.is_none() => {
                     cli.max_pending = Some(value.parse().map_err(|_| USAGE)?);
+                }
+                "--upstream-request-timeout-ms" if cli.upstream_request_timeout_ms.is_none() => {
+                    cli.upstream_request_timeout_ms = Some(value.parse().map_err(|_| USAGE)?);
+                }
+                "--upstream-reader-attempt-timeout-ms"
+                    if cli.upstream_reader_attempt_timeout_ms.is_none() =>
+                {
+                    cli.upstream_reader_attempt_timeout_ms =
+                        Some(value.parse().map_err(|_| USAGE)?);
                 }
                 "--addr" if cli.address.is_none() => cli.address = Some(value),
                 "--writer" if cli.writer.is_none() => cli.writer = Some(value),
@@ -84,19 +93,23 @@ impl Config {
             address,
             writer,
             readers,
-            upstream: UpstreamConfig::new(
-                cli.max_in_flight
-                    .or(file
-                        .upstream
-                        .as_ref()
-                        .and_then(|upstream| upstream.max_in_flight))
-                    .unwrap_or(INTERNAL_MAX_IN_FLIGHT),
-                cli.max_pending
-                    .or(file
-                        .upstream
-                        .as_ref()
-                        .and_then(|upstream| upstream.max_pending))
-                    .unwrap_or(128),
+            upstream: upstream_config(
+                cli.max_in_flight.or(file
+                    .upstream
+                    .as_ref()
+                    .and_then(|upstream| upstream.max_in_flight)),
+                cli.max_pending.or(file
+                    .upstream
+                    .as_ref()
+                    .and_then(|upstream| upstream.max_pending)),
+                cli.upstream_request_timeout_ms.or(file
+                    .upstream
+                    .as_ref()
+                    .and_then(|upstream| upstream.request_timeout_ms)),
+                cli.upstream_reader_attempt_timeout_ms.or(file
+                    .upstream
+                    .as_ref()
+                    .and_then(|upstream| upstream.reader_attempt_timeout_ms)),
             )?,
             rpc: rpc_config(
                 cli.rpc_max_connections
@@ -122,6 +135,8 @@ impl Config {
             "upstream": {
                 "max_in_flight": self.upstream.max_in_flight(),
                 "max_pending": self.upstream.max_pending(),
+                "request_timeout_ms": self.upstream.request_timeout().as_millis(),
+                "reader_attempt_timeout_ms": self.upstream.reader_attempt_timeout().as_millis(),
             },
             "rpc": {
                 "max_connections": self.rpc.max_connections(),
@@ -141,6 +156,8 @@ struct CliConfig {
     readers: Vec<String>,
     max_in_flight: Option<usize>,
     max_pending: Option<usize>,
+    upstream_request_timeout_ms: Option<u64>,
+    upstream_reader_attempt_timeout_ms: Option<u64>,
     rpc_max_connections: Option<usize>,
     rpc_global_max_in_flight: Option<usize>,
     rpc_read_timeout_ms: Option<u64>,
@@ -164,6 +181,8 @@ struct FileConfig {
 struct FileUpstreamConfig {
     max_in_flight: Option<usize>,
     max_pending: Option<usize>,
+    request_timeout_ms: Option<u64>,
+    reader_attempt_timeout_ms: Option<u64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -199,6 +218,27 @@ fn rpc_config(
             .unwrap_or(defaults.write_timeout()),
     )?
     .with_global_max_in_flight(global_max_in_flight.unwrap_or(defaults.global_max_in_flight()))
+}
+
+fn upstream_config(
+    max_in_flight: Option<usize>,
+    max_pending: Option<usize>,
+    request_timeout_ms: Option<u64>,
+    reader_attempt_timeout_ms: Option<u64>,
+) -> Result<UpstreamConfig> {
+    let defaults = UpstreamConfig::default();
+    UpstreamConfig::new(
+        max_in_flight.unwrap_or(defaults.max_in_flight()),
+        max_pending.unwrap_or(defaults.max_pending()),
+    )?
+    .with_timeouts(
+        request_timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(defaults.request_timeout()),
+        reader_attempt_timeout_ms
+            .map(Duration::from_millis)
+            .unwrap_or(defaults.reader_attempt_timeout()),
+    )
 }
 
 pub(crate) fn validate_topology(writer: &str, readers: &[String]) -> Result<()> {
@@ -241,11 +281,14 @@ fn validate_address(address: &str, allow_zero_port: bool) -> Result<()> {
     Ok(())
 }
 
-/// Limits apply independently to each configured backend, including connection waiters.
+/// Admission limits apply independently to each configured backend, including connection
+/// waiters. Routing deadlines apply to the whole request across reader attempts.
 #[derive(Clone, Copy, Debug)]
 pub struct UpstreamConfig {
     max_in_flight: usize,
     max_pending: usize,
+    request_timeout: Duration,
+    reader_attempt_timeout: Duration,
 }
 impl UpstreamConfig {
     pub fn new(max_in_flight: usize, max_pending: usize) -> Result<Self> {
@@ -259,7 +302,26 @@ impl UpstreamConfig {
         Ok(Self {
             max_in_flight,
             max_pending,
+            ..Self::default()
         })
+    }
+    /// The last or only reader receives the remaining total deadline. An intermediate
+    /// reader attempt may be configured longer than that total and is capped at runtime.
+    pub fn with_timeouts(
+        mut self,
+        request_timeout: Duration,
+        reader_attempt_timeout: Duration,
+    ) -> Result<Self> {
+        let now = std::time::Instant::now();
+        if [request_timeout, reader_attempt_timeout]
+            .iter()
+            .any(|duration| duration.is_zero() || now.checked_add(*duration).is_none())
+        {
+            return Err("upstream timeouts must be positive and representable".into());
+        }
+        self.request_timeout = request_timeout;
+        self.reader_attempt_timeout = reader_attempt_timeout;
+        Ok(self)
     }
     pub fn max_in_flight(self) -> usize {
         self.max_in_flight
@@ -267,12 +329,20 @@ impl UpstreamConfig {
     pub fn max_pending(self) -> usize {
         self.max_pending
     }
+    pub fn request_timeout(self) -> Duration {
+        self.request_timeout
+    }
+    pub fn reader_attempt_timeout(self) -> Duration {
+        self.reader_attempt_timeout
+    }
 }
 impl Default for UpstreamConfig {
     fn default() -> Self {
         Self {
             max_in_flight: INTERNAL_MAX_IN_FLIGHT,
             max_pending: 128,
+            request_timeout: Duration::from_secs(5),
+            reader_attempt_timeout: Duration::from_secs(1),
         }
     }
 }

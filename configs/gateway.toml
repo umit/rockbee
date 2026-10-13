@@ -9,6 +9,10 @@ readers = ["127.0.0.1:7102"]
 # Limits apply independently to each configured writer or reader link.
 max_in_flight = 128
 max_pending = 128
+# Total routing deadline, including upstream queue, connection, and reply time.
+request_timeout_ms = 5000
+# Per-reader cap for intermediate GET attempts; the last reader uses all time left.
+reader_attempt_timeout_ms = 1000
 
 [rpc]
 max_connections = 256

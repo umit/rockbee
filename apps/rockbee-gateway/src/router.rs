@@ -6,13 +6,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::time::{Instant, timeout_at};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-const READER_TIMEOUT: Duration = Duration::from_secs(1);
-
 pub struct Router {
     writer: Upstream,
     readers: Vec<Upstream>,
     next_reader: AtomicUsize,
+    request_timeout: Duration,
+    reader_attempt_timeout: Duration,
 }
 
 impl Router {
@@ -26,6 +25,8 @@ impl Router {
         upstream: UpstreamConfig,
     ) -> Result<Self> {
         validate_topology(&writer, &readers)?;
+        let request_timeout = upstream.request_timeout();
+        let reader_attempt_timeout = upstream.reader_attempt_timeout();
         Ok(Self {
             writer: Upstream::new(writer, upstream),
             readers: readers
@@ -33,6 +34,8 @@ impl Router {
                 .map(|reader| Upstream::new(reader, upstream))
                 .collect(),
             next_reader: AtomicUsize::new(0),
+            request_timeout,
+            reader_attempt_timeout,
         })
     }
 
@@ -63,13 +66,13 @@ impl Router {
                 // Never retry a mutation: an absent reply does not prove it failed.
                 return self
                     .writer
-                    .exchange(&mutation, Instant::now() + REQUEST_TIMEOUT)
+                    .exchange(&mutation, Instant::now() + self.request_timeout)
                     .await;
             }
             Request::Status => return Err("Status must be handled locally by RPC".into()),
         };
         let start = self.next_reader.fetch_add(1, Ordering::Relaxed) % self.readers.len();
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let deadline = Instant::now() + self.request_timeout;
         let mut first_reader_error = None;
         for offset in 0..self.readers.len() {
             if Instant::now() >= deadline {
@@ -84,8 +87,11 @@ impl Router {
                 let Ok(mut get) = reader.start_get(&key, deadline) else {
                     continue;
                 };
-                let result =
-                    timeout_at(deadline.min(Instant::now() + READER_TIMEOUT), &mut get).await;
+                let result = timeout_at(
+                    deadline.min(Instant::now() + self.reader_attempt_timeout),
+                    &mut get,
+                )
+                .await;
                 drop(get);
                 match result {
                     Ok(Ok(result)) => result,

@@ -1,4 +1,4 @@
-use rockbee_gateway::config::Config as GatewayConfig;
+use rockbee_gateway::config::{Config as GatewayConfig, UpstreamConfig};
 use std::time::Duration;
 
 fn parse(args: &[&str]) -> rockbee_node::Result<Option<GatewayConfig>> {
@@ -22,6 +22,11 @@ fn gateway_rpc_flags_default_parse_and_validate_once() {
     assert_eq!(default.rpc.global_max_in_flight(), 128);
     assert_eq!(default.rpc.read_timeout(), Duration::from_secs(30));
     assert_eq!(default.rpc.write_timeout(), Duration::from_secs(5));
+    assert_eq!(default.upstream.request_timeout(), Duration::from_secs(5));
+    assert_eq!(
+        default.upstream.reader_attempt_timeout(),
+        Duration::from_secs(1)
+    );
     assert!(!default.check_config);
 
     let mut global_only = base();
@@ -64,6 +69,87 @@ fn gateway_rpc_flags_default_parse_and_validate_once() {
         let mut args = base();
         args.extend(suffix);
         assert!(parse(&args).is_err(), "{args:?}");
+    }
+}
+
+#[test]
+fn gateway_upstream_timeout_flags_default_parse_and_validate_once() {
+    let mut request_only = base();
+    request_only.extend(["--upstream-request-timeout-ms", "2500"]);
+    let request_only = parse(&request_only).unwrap().unwrap();
+    assert_eq!(
+        request_only.upstream.request_timeout(),
+        Duration::from_millis(2500)
+    );
+    assert_eq!(
+        request_only.upstream.reader_attempt_timeout(),
+        Duration::from_secs(1)
+    );
+
+    let mut selected = base();
+    selected.extend([
+        "--upstream-request-timeout-ms",
+        "500",
+        "--upstream-reader-attempt-timeout-ms",
+        "750",
+    ]);
+    let selected = parse(&selected).unwrap().unwrap();
+    // A per-reader attempt may exceed the request budget; execution uses the
+    // remaining request budget as its cap.
+    assert_eq!(
+        selected.upstream.request_timeout(),
+        Duration::from_millis(500)
+    );
+    assert_eq!(
+        selected.upstream.reader_attempt_timeout(),
+        Duration::from_millis(750)
+    );
+
+    for suffix in [
+        vec!["--upstream-request-timeout-ms", "0"],
+        vec!["--upstream-reader-attempt-timeout-ms", "0"],
+        vec!["--upstream-request-timeout-ms", "bad"],
+        vec!["--upstream-reader-attempt-timeout-ms", "bad"],
+        vec!["--upstream-request-timeout-ms", "18446744073709551616"],
+        vec![
+            "--upstream-reader-attempt-timeout-ms",
+            "18446744073709551616",
+        ],
+        vec![
+            "--upstream-request-timeout-ms",
+            "1",
+            "--upstream-request-timeout-ms",
+            "2",
+        ],
+        vec![
+            "--upstream-reader-attempt-timeout-ms",
+            "1",
+            "--upstream-reader-attempt-timeout-ms",
+            "2",
+        ],
+        vec!["--upstream-request-timeout-ms"],
+        vec!["--upstream-reader-attempt-timeout-ms"],
+    ] {
+        let mut args = base();
+        args.extend(suffix);
+        assert!(parse(&args).is_err(), "{args:?}");
+    }
+}
+
+#[test]
+fn upstream_timeouts_reject_zero_and_unrepresentable_durations() {
+    for (request, reader_attempt) in [
+        (Duration::ZERO, Duration::from_millis(1)),
+        (Duration::from_millis(1), Duration::ZERO),
+        (Duration::MAX, Duration::from_millis(1)),
+        (Duration::from_millis(1), Duration::MAX),
+    ] {
+        assert!(
+            UpstreamConfig::new(1, 1)
+                .unwrap()
+                .with_timeouts(request, reader_attempt)
+                .is_err()
+        );
     }
 }
 
@@ -186,6 +272,8 @@ readers = ["reader-a.example:7102", "reader-b.example:7103"]
 [upstream]
 max_in_flight = 64
 max_pending = 32
+request_timeout_ms = 2400
+reader_attempt_timeout_ms = 350
 
 [rpc]
 max_connections = 17
@@ -210,6 +298,14 @@ write_timeout_ms = 3000
     );
     assert_eq!(config.upstream.max_in_flight(), 64);
     assert_eq!(config.upstream.max_pending(), 32);
+    assert_eq!(
+        config.upstream.request_timeout(),
+        Duration::from_millis(2400)
+    );
+    assert_eq!(
+        config.upstream.reader_attempt_timeout(),
+        Duration::from_millis(350)
+    );
     assert_eq!(config.rpc.max_connections(), 17);
     assert_eq!(config.rpc.global_max_in_flight(), 8);
     assert_eq!(config.rpc.read_timeout(), Duration::from_millis(2000));
@@ -231,6 +327,8 @@ readers = ["reader-a.example:7102", "reader-b.example:7103"]
 [upstream]
 max_in_flight = 64
 max_pending = 32
+request_timeout_ms = 2400
+reader_attempt_timeout_ms = 350
 
 [rpc]
 max_connections = 17
@@ -251,6 +349,8 @@ write_timeout_ms = 3000
         "reader-override.example:7102".to_owned(),
         "--upstream-max-pending".to_owned(),
         "16".to_owned(),
+        "--upstream-request-timeout-ms".to_owned(),
+        "4000".to_owned(),
         "--rpc-write-timeout-ms".to_owned(),
         "4000".to_owned(),
     ])?
@@ -260,6 +360,11 @@ write_timeout_ms = 3000
     assert_eq!(config.readers, ["reader-override.example:7102"]);
     assert_eq!(config.upstream.max_in_flight(), 64);
     assert_eq!(config.upstream.max_pending(), 16);
+    assert_eq!(config.upstream.request_timeout(), Duration::from_secs(4));
+    assert_eq!(
+        config.upstream.reader_attempt_timeout(),
+        Duration::from_millis(350)
+    );
     assert_eq!(config.rpc.max_connections(), 17);
     assert_eq!(config.rpc.write_timeout(), Duration::from_millis(4000));
     Ok(())
@@ -301,6 +406,14 @@ fn gateway_rejects_unreadable_malformed_and_invalid_effective_toml() -> rockbee_
         (
             "invalid-upstream",
             "writer = \"writer.example:7101\"\nreaders = [\"reader.example:7102\"]\n[upstream]\nmax_in_flight = 0\n",
+        ),
+        (
+            "invalid-upstream-timeout",
+            "writer = \"writer.example:7101\"\nreaders = [\"reader.example:7102\"]\n[upstream]\nrequest_timeout_ms = 0\n",
+        ),
+        (
+            "invalid-upstream-reader-attempt-timeout",
+            "writer = \"writer.example:7101\"\nreaders = [\"reader.example:7102\"]\n[upstream]\nreader_attempt_timeout_ms = 0\n",
         ),
         (
             "invalid-rpc",
