@@ -1,7 +1,7 @@
 use super::{Result, config::RunConfig};
 use serde_json::{Value, json};
 use std::fs::{File, create_dir_all};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, IsTerminal, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -18,6 +18,12 @@ pub(super) async fn run(config: RunConfig) -> Result<()> {
     let prefix = unique_prefix()?;
     let logs = unique_log_dir()?;
     let mut signals = Signals::register()?;
+    if std::io::stderr().is_terminal() {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "\n   \\ /\n  (o o)  ROCKBEE\n /|===|\\ local\n   ===\n"
+        );
+    }
     let mut children = Vec::with_capacity(3);
 
     let result = async {

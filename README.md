@@ -226,6 +226,18 @@ its backends work, and a reader's response does not prove it has caught up.
 Use `make probe` for all configured roles and `make visibility` to observe
 write visibility. Status does not issue a KV mutation or retry a failed request.
 
+Gateway, writer, and reader emit newline-delimited JSON lifecycle events on
+stdout: `ready` once listening, then `stopped` after a successful graceful
+shutdown or `failed` if startup, serving, or shutdown returns an error. Terminal
+events include the role, address, `uptime_ms`, and a shutdown reason or error.
+Uptime includes startup time after configuration validation. Invalid arguments
+and configuration errors exit before this lifecycle begins; abrupt process
+termination such as SIGKILL cannot emit a final event.
+
+An ASCII Rockbee banner appears on stderr when starting in a terminal, including
+with `make local`. It is omitted from captured stderr, `--help`, and
+`--check-config`, keeping machine-readable stdout intact.
+
 The reader's `[reader].poll_interval_ms` setting in
 [configs/reader.toml](configs/reader.toml) controls how often SlateDB checks for
 durable updates. It defaults to `10000` (10 seconds). A shorter interval adds
