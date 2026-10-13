@@ -210,6 +210,22 @@ file reader list. Unknown TOML fields are rejected. Explicit Make overrides
 such as `make gateway READER_ADDR=127.0.0.1:7202` still work and replace that
 list with the supplied reader. Configuration is loaded once at startup.
 
+Query one running service with the command-line client:
+
+```sh
+./target/release/rockbee-client --addr 127.0.0.1:7100 status --expect-role gateway
+./target/release/rockbee-client --addr 127.0.0.1:7101 status --expect-role writer
+./target/release/rockbee-client --addr 127.0.0.1:7102 status --expect-role reader --timeout-ms 2000
+```
+
+`status` prints one JSON record with the endpoint's role and RPC counters. It
+exits unsuccessfully on an unreachable endpoint, timeout, malformed reply, or
+role mismatch. `--expect-role` is optional; the default timeout is two seconds.
+This checks the named process only: a gateway's Status response does not prove
+its backends work, and a reader's response does not prove it has caught up.
+Use `make probe` for all configured roles and `make visibility` to observe
+write visibility. Status does not issue a KV mutation or retry a failed request.
+
 The reader's `[reader].poll_interval_ms` setting in
 [configs/reader.toml](configs/reader.toml) controls how often SlateDB checks for
 durable updates. It defaults to `10000` (10 seconds). A shorter interval adds

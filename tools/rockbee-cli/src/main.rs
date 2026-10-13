@@ -1,20 +1,26 @@
 use rockbee_client::{Client, Result};
 use rockbee_protocol::Response;
+mod status;
+
 const DEFAULT_ADDR: &str = "127.0.0.1:7100";
+const USAGE: &str = "Usage: rockbee-client [--addr HOST:PORT] put KEY VALUE [--ttl-ms N] | get KEY | delete KEY | status [--expect-role gateway|writer|reader] [--timeout-ms N] (TTL 0 means no expiry)";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let usage = "Usage: rockbee-client [--addr HOST:PORT] put KEY VALUE [--ttl-ms N] | get KEY | delete KEY (TTL 0 means no expiry)";
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
-        println!("{usage}\nDefault address: {DEFAULT_ADDR}");
+        println!("{USAGE}\nDefault address: {DEFAULT_ADDR}");
         return Ok(());
     }
     let (address, command) = if args.first().map(String::as_str) == Some("--addr") {
-        (args.get(1).ok_or(usage)?.as_str(), &args[2..])
+        (args.get(1).ok_or(USAGE)?.as_str(), &args[2..])
     } else {
         (DEFAULT_ADDR, args.as_slice())
     };
+
+    if command.first().map(String::as_str) == Some("status") {
+        return status::run(address, &command[1..]).await;
+    }
 
     let response = match command {
         [op, key, value, flag, ttl] if op == "put" && flag == "--ttl-ms" => {
@@ -43,7 +49,7 @@ async fn main() -> Result<()> {
                 .await?;
             Response::Ok
         }
-        _ => return Err(usage.into()),
+        _ => return Err(USAGE.into()),
     };
     println!("{}", serde_json::to_string(&response)?);
     Ok(())

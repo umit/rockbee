@@ -121,6 +121,41 @@ async fn eventually(client: &Client, key: &[u8], expected: Option<&[u8]>) -> Res
     }
 }
 
+async fn status(bin_dir: &std::path::Path, endpoint: &str, expected_role: &str) -> Result<Value> {
+    let mut child = Command::new(bin_dir.join("rockbee-client"))
+        .args([
+            "--addr",
+            endpoint,
+            "status",
+            "--expect-role",
+            expected_role,
+            "--timeout-ms",
+            "2000",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Err("status exceeded external test deadline".into());
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    let result = child.wait_with_output()?;
+    if !result.status.success() {
+        return Err(format!(
+            "{expected_role} status failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        )
+        .into());
+    }
+    Ok(serde_json::from_slice(&result.stdout)?)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires release binaries, LocalStack and rockbee-test bucket; use make test-local"]
 async fn local_operator_starts_probes_byte_crud_and_stops_owned_roles() -> Result<()> {
@@ -142,6 +177,16 @@ async fn local_operator_starts_probes_byte_crud_and_stops_owned_roles() -> Resul
     eprintln!("operator acceptance ready={ready}");
 
     let work = async {
+        for (endpoint, role) in [(gateway, "gateway"), (writer, "writer"), (reader, "reader")] {
+            let row = status(&bin_dir, endpoint, role).await?;
+            assert_eq!(row["ok"], true, "{row}");
+            assert_eq!(row["endpoint"], endpoint);
+            assert_eq!(row["expected_role"], role);
+            assert_eq!(row["observed_role"], role);
+            assert_eq!(row["counters"]["requests_completed_total"], 0);
+            assert_eq!(row["counters"]["error_responses_total"], 0);
+        }
+
         let mut probe = Command::new(bin_dir.join("rockbee-local"))
             .args([
                 "probe",
