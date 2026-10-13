@@ -22,6 +22,20 @@ READER_ADDR ?= 127.0.0.1:7102
 GATEWAY_ADDR ?= 127.0.0.1:7100
 WRITER_CONFIG ?= configs/writer.toml
 READER_CONFIG ?= configs/reader.toml
+GATEWAY_CONFIG ?= configs/gateway.toml
+
+# The gateway file owns its topology unless an address is explicitly supplied
+# through make's command line or environment. A reader override replaces the list.
+GATEWAY_OVERRIDES :=
+ifneq ($(origin GATEWAY_ADDR),file)
+GATEWAY_OVERRIDES += --addr "$(GATEWAY_ADDR)"
+endif
+ifneq ($(origin WRITER_ADDR),file)
+GATEWAY_OVERRIDES += --writer "$(WRITER_ADDR)"
+endif
+ifneq ($(origin READER_ADDR),file)
+GATEWAY_OVERRIDES += --reader "$(READER_ADDR)"
+endif
 
 BENCH_ADDR ?= $(GATEWAY_ADDR)
 BENCH_SECONDS ?= 60
@@ -66,6 +80,7 @@ help:
 	  'Services use LocalStack at ENDPOINT and BUCKET; make local always generates a unique prefix.' \
 	  'For make local, use the addresses printed in its ready JSON with make probe or benchmark.' \
 	  'WRITER_CONFIG / READER_CONFIG select TOML; explicit Makefile CLI values override the file.' \
+	  'GATEWAY_CONFIG selects gateway TOML; explicit GATEWAY_ADDR / WRITER_ADDR / READER_ADDR override it.' \
 	  'Override CARGO_TARGET_DIR to reuse another Cargo build directory.'
 
 build:
@@ -84,7 +99,7 @@ reader: build
 	"$(READER)" --config "$(READER_CONFIG)" --role reader --addr "$(READER_ADDR)" --backend localstack --endpoint "$(ENDPOINT)" --bucket "$(BUCKET)" --prefix "$(PREFIX)"
 
 gateway: build
-	"$(GATEWAY)" --addr "$(GATEWAY_ADDR)" --writer "$(WRITER_ADDR)" --reader "$(READER_ADDR)"
+	"$(GATEWAY)" --config "$(GATEWAY_CONFIG)" $(GATEWAY_OVERRIDES)
 
 fmt:
 	$(CARGO) fmt --all

@@ -13,7 +13,9 @@ workspace = true
 rockbee-protocol = { path = "../../crates/rockbee-protocol" }
 rockbee-rpc = { path = "../../crates/rockbee-rpc" }
 tokio = { workspace = true }
+serde = { workspace = true }
 serde_json = "1"
+toml = "0.8.23"
 
 [dev-dependencies]
 rockbee-client = { path = "../../crates/rockbee-client" }

@@ -195,13 +195,20 @@ Check configuration before starting the services:
 ```sh
 ./target/release/rockbee-writer --config configs/writer.toml --check-config
 ./target/release/rockbee-reader --config configs/reader.toml --check-config
-./target/release/rockbee-gateway --writer 127.0.0.1:7101 \
-  --reader 127.0.0.1:7102 --check-config
+./target/release/rockbee-gateway --config configs/gateway.toml --check-config
 ```
 
 These commands print effective settings as JSON and exit without starting the
 services. Gateway validation checks addresses and limits locally; it does not
 check DNS, backend reachability, or backend roles.
+
+`make gateway` reads [configs/gateway.toml](configs/gateway.toml) for its
+listener, writer, readers, and existing upstream/RPC limits. Override the file
+with `GATEWAY_CONFIG=path/to/gateway.toml`. Explicit CLI flags take precedence
+over TOML, then built-in defaults; CLI `--reader` entries replace the entire
+file reader list. Unknown TOML fields are rejected. Explicit Make overrides
+such as `make gateway READER_ADDR=127.0.0.1:7202` still work and replace that
+list with the supplied reader. Configuration is loaded once at startup.
 
 The reader's `[reader].poll_interval_ms` setting in
 [configs/reader.toml](configs/reader.toml) controls how often SlateDB checks for
@@ -291,6 +298,7 @@ binary remains available for compatibility.
 
 [Reader configuration](configs/reader.toml) ·
 [Writer configuration](configs/writer.toml) ·
+[Gateway configuration](configs/gateway.toml) ·
 [Contributing](CONTRIBUTING.md)
 
 Design notes, research, and verification receipts are maintained separately in

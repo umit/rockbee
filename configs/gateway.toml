@@ -1,0 +1,17 @@
+# Rockbee gateway. Start after writer and at least one reader.
+# Start: rockbee-gateway --config configs/gateway.toml
+# Inspect without binding or contacting a backend: add --check-config
+addr = "127.0.0.1:7100"
+writer = "127.0.0.1:7101"
+readers = ["127.0.0.1:7102"]
+
+[upstream]
+# Limits apply independently to each configured writer or reader link.
+max_in_flight = 128
+max_pending = 128
+
+[rpc]
+max_connections = 256
+global_max_in_flight = 128
+read_timeout_ms = 30000
+write_timeout_ms = 5000

@@ -189,17 +189,13 @@ fn start_gateway(
     reader: &str,
     logs: &TempDir,
 ) -> Result<ReadyChild> {
-    let args = [
-        "--addr",
-        "127.0.0.1:0",
-        "--writer",
-        writer,
-        "--reader",
-        reader,
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
+    let config = logs.path().join("gateway.toml");
+    // These addresses come from the owned roles' parsed loopback readiness records.
+    std::fs::write(
+        &config,
+        format!("addr = \"127.0.0.1:0\"\nwriter = \"{writer}\"\nreaders = [\"{reader}\"]\n"),
+    )?;
+    let args = vec!["--config".to_owned(), config.to_string_lossy().into_owned()];
     start_process(executable, &args, "gateway", logs)
 }
 

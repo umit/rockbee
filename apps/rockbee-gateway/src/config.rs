@@ -1,10 +1,12 @@
 use crate::{Result, RpcConfig};
 use rockbee_protocol::INTERNAL_MAX_IN_FLIGHT;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::Duration;
 
-pub const USAGE: &str = "Usage: rockbee-gateway [--addr HOST:PORT] --writer HOST:PORT --reader HOST:PORT [--reader HOST:PORT ...] [--upstream-max-in-flight COUNT] [--upstream-max-pending COUNT] [--rpc-max-connections COUNT] [--rpc-global-max-in-flight COUNT] [--rpc-read-timeout-ms MILLISECONDS] [--rpc-write-timeout-ms MILLISECONDS] [--check-config]";
+pub const USAGE: &str = "Usage: rockbee-gateway [--addr HOST:PORT] [--writer HOST:PORT] [--reader HOST:PORT ...] [--upstream-max-in-flight COUNT] [--upstream-max-pending COUNT] [--rpc-max-connections COUNT] [--rpc-global-max-in-flight COUNT] [--rpc-read-timeout-ms MILLISECONDS] [--rpc-write-timeout-ms MILLISECONDS] [--config PATH] [--check-config]";
 
 pub struct Config {
     pub address: String,
@@ -17,26 +19,17 @@ pub struct Config {
 
 impl Config {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Self>> {
-        let mut address = None;
-        let mut writer = None;
-        let mut readers = Vec::new();
-        let mut max_in_flight = None;
-        let mut max_pending = None;
-        let mut rpc_max_connections = None;
-        let mut rpc_global_max_in_flight = None;
-        let mut rpc_read_timeout_ms = None;
-        let mut rpc_write_timeout_ms = None;
-        let mut check_config = false;
+        let mut cli = CliConfig::default();
         let mut args = args.into_iter();
         while let Some(flag) = args.next() {
             if flag == "--help" || flag == "-h" {
                 return Ok(None);
             }
             if flag == "--check-config" {
-                if check_config {
+                if cli.check_config {
                     return Err(USAGE.into());
                 }
-                check_config = true;
+                cli.check_config = true;
                 continue;
             }
             let value = args
@@ -44,49 +37,78 @@ impl Config {
                 .filter(|v| !v.is_empty() && !v.starts_with("--"))
                 .ok_or(USAGE)?;
             match flag.as_str() {
-                "--upstream-max-in-flight" if max_in_flight.is_none() => {
-                    max_in_flight = Some(value.parse().map_err(|_| USAGE)?);
+                "--upstream-max-in-flight" if cli.max_in_flight.is_none() => {
+                    cli.max_in_flight = Some(value.parse().map_err(|_| USAGE)?);
                 }
-                "--upstream-max-pending" if max_pending.is_none() => {
-                    max_pending = Some(value.parse().map_err(|_| USAGE)?);
+                "--upstream-max-pending" if cli.max_pending.is_none() => {
+                    cli.max_pending = Some(value.parse().map_err(|_| USAGE)?);
                 }
-                "--addr" if address.is_none() => address = Some(value),
-                "--writer" if writer.is_none() => writer = Some(value),
-                "--reader" => readers.push(value),
-                "--rpc-max-connections" if rpc_max_connections.is_none() => {
-                    rpc_max_connections = Some(value.parse().map_err(|_| USAGE)?);
+                "--addr" if cli.address.is_none() => cli.address = Some(value),
+                "--writer" if cli.writer.is_none() => cli.writer = Some(value),
+                "--reader" => cli.readers.push(value),
+                "--rpc-max-connections" if cli.rpc_max_connections.is_none() => {
+                    cli.rpc_max_connections = Some(value.parse().map_err(|_| USAGE)?);
                 }
-                "--rpc-global-max-in-flight" if rpc_global_max_in_flight.is_none() => {
-                    rpc_global_max_in_flight = Some(value.parse().map_err(|_| USAGE)?);
+                "--rpc-global-max-in-flight" if cli.rpc_global_max_in_flight.is_none() => {
+                    cli.rpc_global_max_in_flight = Some(value.parse().map_err(|_| USAGE)?);
                 }
-                "--rpc-read-timeout-ms" if rpc_read_timeout_ms.is_none() => {
-                    rpc_read_timeout_ms = Some(value.parse().map_err(|_| USAGE)?);
+                "--rpc-read-timeout-ms" if cli.rpc_read_timeout_ms.is_none() => {
+                    cli.rpc_read_timeout_ms = Some(value.parse().map_err(|_| USAGE)?);
                 }
-                "--rpc-write-timeout-ms" if rpc_write_timeout_ms.is_none() => {
-                    rpc_write_timeout_ms = Some(value.parse().map_err(|_| USAGE)?);
+                "--rpc-write-timeout-ms" if cli.rpc_write_timeout_ms.is_none() => {
+                    cli.rpc_write_timeout_ms = Some(value.parse().map_err(|_| USAGE)?);
                 }
+                "--config" if cli.config.is_none() => cli.config = Some(value.into()),
                 _ => return Err(USAGE.into()),
             }
         }
-        let writer = writer.ok_or(USAGE)?;
+        let file = match &cli.config {
+            Some(path) => read_config_file(path)?,
+            None => FileConfig::default(),
+        };
+        let writer = cli.writer.or(file.writer).ok_or(USAGE)?;
+        // Supplying any --reader values replaces the file list instead of
+        // mixing two topology declarations.
+        let readers = if cli.readers.is_empty() {
+            file.readers.unwrap_or_default()
+        } else {
+            cli.readers
+        };
         validate_topology(&writer, &readers)?;
-        let address = address.unwrap_or_else(|| "127.0.0.1:7100".to_owned());
+        let address = cli
+            .address
+            .or(file.addr)
+            .unwrap_or_else(|| "127.0.0.1:7100".to_owned());
         validate_address(&address, true)?;
         Ok(Some(Self {
             address,
             writer,
             readers,
             upstream: UpstreamConfig::new(
-                max_in_flight.unwrap_or(INTERNAL_MAX_IN_FLIGHT),
-                max_pending.unwrap_or(128),
+                cli.max_in_flight
+                    .or(file
+                        .upstream
+                        .as_ref()
+                        .and_then(|upstream| upstream.max_in_flight))
+                    .unwrap_or(INTERNAL_MAX_IN_FLIGHT),
+                cli.max_pending
+                    .or(file
+                        .upstream
+                        .as_ref()
+                        .and_then(|upstream| upstream.max_pending))
+                    .unwrap_or(128),
             )?,
             rpc: rpc_config(
-                rpc_max_connections,
-                rpc_global_max_in_flight,
-                rpc_read_timeout_ms,
-                rpc_write_timeout_ms,
+                cli.rpc_max_connections
+                    .or(file.rpc.as_ref().and_then(|rpc| rpc.max_connections)),
+                cli.rpc_global_max_in_flight
+                    .or(file.rpc.as_ref().and_then(|rpc| rpc.global_max_in_flight)),
+                cli.rpc_read_timeout_ms
+                    .or(file.rpc.as_ref().and_then(|rpc| rpc.read_timeout_ms)),
+                cli.rpc_write_timeout_ms
+                    .or(file.rpc.as_ref().and_then(|rpc| rpc.write_timeout_ms)),
             )?,
-            check_config,
+            check_config: cli.check_config,
         }))
     }
 
@@ -110,6 +132,54 @@ impl Config {
             "check_config": self.check_config,
         })
     }
+}
+
+#[derive(Default)]
+struct CliConfig {
+    address: Option<String>,
+    writer: Option<String>,
+    readers: Vec<String>,
+    max_in_flight: Option<usize>,
+    max_pending: Option<usize>,
+    rpc_max_connections: Option<usize>,
+    rpc_global_max_in_flight: Option<usize>,
+    rpc_read_timeout_ms: Option<u64>,
+    rpc_write_timeout_ms: Option<u64>,
+    config: Option<PathBuf>,
+    check_config: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileConfig {
+    addr: Option<String>,
+    writer: Option<String>,
+    readers: Option<Vec<String>>,
+    upstream: Option<FileUpstreamConfig>,
+    rpc: Option<FileRpcConfig>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileUpstreamConfig {
+    max_in_flight: Option<usize>,
+    max_pending: Option<usize>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileRpcConfig {
+    max_connections: Option<usize>,
+    global_max_in_flight: Option<usize>,
+    read_timeout_ms: Option<u64>,
+    write_timeout_ms: Option<u64>,
+}
+
+fn read_config_file(path: &PathBuf) -> Result<FileConfig> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read config file {}: {error}", path.display()))?;
+    toml::from_str(&contents)
+        .map_err(|error| format!("invalid config file {}: {error}", path.display()).into())
 }
 
 fn rpc_config(

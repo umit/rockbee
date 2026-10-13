@@ -5,6 +5,10 @@ fn parse(args: &[&str]) -> rockbee_node::Result<Option<GatewayConfig>> {
     GatewayConfig::parse(args.iter().map(|arg| (*arg).to_owned()))
 }
 
+fn parse_owned(args: Vec<String>) -> rockbee_node::Result<Option<GatewayConfig>> {
+    GatewayConfig::parse(args)
+}
+
 fn base() -> Vec<&'static str> {
     vec!["--writer", "127.0.0.1:7000", "--reader", "127.0.0.1:7001"]
 }
@@ -166,4 +170,151 @@ fn gateway_check_config_keeps_validation_and_rejects_duplicate_switches() {
     .unwrap();
     assert!(config.check_config);
     assert_eq!(config.address, "[::1]:0");
+}
+
+#[test]
+fn gateway_toml_supplies_a_complete_topology_and_limits() -> rockbee_node::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("gateway.toml");
+    std::fs::write(
+        &path,
+        r#"
+addr = "127.0.0.1:7110"
+writer = "writer.example:7101"
+readers = ["reader-a.example:7102", "reader-b.example:7103"]
+
+[upstream]
+max_in_flight = 64
+max_pending = 32
+
+[rpc]
+max_connections = 17
+global_max_in_flight = 8
+read_timeout_ms = 2000
+write_timeout_ms = 3000
+"#,
+    )?;
+
+    let config = parse_owned(vec![
+        "--config".to_owned(),
+        path.display().to_string(),
+        "--check-config".to_owned(),
+    ])?
+    .expect("not help");
+    assert!(config.check_config);
+    assert_eq!(config.address, "127.0.0.1:7110");
+    assert_eq!(config.writer, "writer.example:7101");
+    assert_eq!(
+        config.readers,
+        ["reader-a.example:7102", "reader-b.example:7103"]
+    );
+    assert_eq!(config.upstream.max_in_flight(), 64);
+    assert_eq!(config.upstream.max_pending(), 32);
+    assert_eq!(config.rpc.max_connections(), 17);
+    assert_eq!(config.rpc.global_max_in_flight(), 8);
+    assert_eq!(config.rpc.read_timeout(), Duration::from_millis(2000));
+    assert_eq!(config.rpc.write_timeout(), Duration::from_millis(3000));
+    Ok(())
+}
+
+#[test]
+fn gateway_cli_overrides_toml_and_replaces_reader_list() -> rockbee_node::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("gateway.toml");
+    std::fs::write(
+        &path,
+        r#"
+addr = "127.0.0.1:7110"
+writer = "writer.example:7101"
+readers = ["reader-a.example:7102", "reader-b.example:7103"]
+
+[upstream]
+max_in_flight = 64
+max_pending = 32
+
+[rpc]
+max_connections = 17
+global_max_in_flight = 8
+read_timeout_ms = 2000
+write_timeout_ms = 3000
+"#,
+    )?;
+
+    let config = parse_owned(vec![
+        "--config".to_owned(),
+        path.display().to_string(),
+        "--addr".to_owned(),
+        "127.0.0.1:7120".to_owned(),
+        "--writer".to_owned(),
+        "writer-override.example:7101".to_owned(),
+        "--reader".to_owned(),
+        "reader-override.example:7102".to_owned(),
+        "--upstream-max-pending".to_owned(),
+        "16".to_owned(),
+        "--rpc-write-timeout-ms".to_owned(),
+        "4000".to_owned(),
+    ])?
+    .expect("not help");
+    assert_eq!(config.address, "127.0.0.1:7120");
+    assert_eq!(config.writer, "writer-override.example:7101");
+    assert_eq!(config.readers, ["reader-override.example:7102"]);
+    assert_eq!(config.upstream.max_in_flight(), 64);
+    assert_eq!(config.upstream.max_pending(), 16);
+    assert_eq!(config.rpc.max_connections(), 17);
+    assert_eq!(config.rpc.write_timeout(), Duration::from_millis(4000));
+    Ok(())
+}
+
+#[test]
+fn gateway_rejects_unknown_toml_fields_at_every_level() -> rockbee_node::Result<()> {
+    let directory = tempfile::tempdir()?;
+    for (name, contents) in [
+        (
+            "top-level",
+            "writer = \"writer.example:7101\"\nreaders = [\"reader.example:7102\"]\nextra = true\n",
+        ),
+        (
+            "upstream",
+            "writer = \"writer.example:7101\"\nreaders = [\"reader.example:7102\"]\n[upstream]\nunknown = 1\n",
+        ),
+        (
+            "rpc",
+            "writer = \"writer.example:7101\"\nreaders = [\"reader.example:7102\"]\n[rpc]\nunknown = 1\n",
+        ),
+    ] {
+        let path = directory.path().join(format!("{name}.toml"));
+        std::fs::write(&path, contents)?;
+        let result = parse_owned(vec!["--config".to_owned(), path.display().to_string()]);
+        assert!(result.is_err(), "{name} unknown field was accepted");
+    }
+    Ok(())
+}
+
+#[test]
+fn gateway_rejects_unreadable_malformed_and_invalid_effective_toml() -> rockbee_node::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let missing = directory.path().join("missing.toml");
+    assert!(parse_owned(vec!["--config".to_owned(), missing.display().to_string()]).is_err());
+
+    for (name, contents) in [
+        ("malformed", "writer = [\n"),
+        (
+            "invalid-upstream",
+            "writer = \"writer.example:7101\"\nreaders = [\"reader.example:7102\"]\n[upstream]\nmax_in_flight = 0\n",
+        ),
+        (
+            "invalid-rpc",
+            "writer = \"writer.example:7101\"\nreaders = [\"reader.example:7102\"]\n[rpc]\nread_timeout_ms = 0\n",
+        ),
+        (
+            "invalid-readers",
+            "writer = \"writer.example:7101\"\nreaders = [\"reader.example:7102\", \"reader.example:7102\"]\n",
+        ),
+    ] {
+        let path = directory.path().join(format!("{name}.toml"));
+        std::fs::write(&path, contents)?;
+        let result = parse_owned(vec!["--config".to_owned(), path.display().to_string()]);
+        assert!(result.is_err(), "{name} TOML was accepted");
+    }
+    Ok(())
 }

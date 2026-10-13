@@ -2037,10 +2037,12 @@ dependencies = [
  "rockbee-node",
  "rockbee-protocol",
  "rockbee-rpc",
+ "serde",
  "serde_json",
  "slatedb",
  "tempfile",
  "tokio",
+ "toml",
 ]
 
 [[package]]
