@@ -107,15 +107,24 @@ other decisions requiring immediate consistency need a transactional store.
 <details>
 <summary><strong>AI and machine learning</strong></summary>
 
+Keep model outputs, saved context, and run history in flexible JSON records.
+Retrieve by key and explore published table data with SQL.
+
 | Use case | What you store | How you use it |
 | --- | --- | --- |
-| AI results | Summaries, classifications, generated descriptions, or other completed model outputs. | Store under a caller-supplied model/input key and reuse the result instead of running inference again. |
+| Model outputs | Summaries, classifications, and generated descriptions. | Reuse completed results by a key identifying the model version and input revision. |
+| Agent context | Conversation summaries, preferences, document references, and selected tool results. | Load a saved snapshot by conversation or task ID to assemble the next prompt. |
+| Evaluations | Run IDs, model versions, datasets, and evaluation scores. | Compare published results with SQL filters and aggregates. |
+| Chat & agent logs | Messages, tool calls, results, statuses, and durations, grouped by conversation and run. | Store each event by ID; inspect published events with SQL in application-supplied sequence order. |
+| Prompt versions | Prompt text and model settings under an explicit version ID, such as `support-agent:v3`. | Let your application select the version to load for each request. |
 | Recommendations | Precomputed product or content IDs for a user or segment. | Read a recommendation list by key while a pipeline refreshes it in the background. |
-| ML features | Application-encoded features for an item, user, or model. | Fetch prepared features by key when serving predictions. |
-| Experiment metrics | JSON records containing run IDs, model versions, and evaluation scores. | Compare published results with SQL filters and aggregates. |
+| Feature serving | Pipeline-computed ML features under an entity-and-version key. | Fetch prepared features by key when serving predictions. |
+| User feedback | Ratings and comments linked to a response or model version. | Query published feedback with SQL to inspect ratings and compare results. |
 
-Your models and pipelines produce the data; Rockbee stores and serves it.
+Your application runs the models and selects the context; Rockbee stores and serves the data.
 Feature vectors are values retrieved by key, not a vector similarity index.
+
+[Explore the AI examples on the website →](https://umitunal.net/rockbee/#ai)
 
 </details>
 
