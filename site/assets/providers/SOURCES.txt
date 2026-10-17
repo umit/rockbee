@@ -1,0 +1,25 @@
+Provider marks in this directory are unmodified brand vectors. AWS, Google
+Cloud, and Azure come from Wikimedia Commons, a well-established open-source
+media archive. The MinIO wordmark comes from MinIO's official repository. They
+are shown only as small illustrations next to product copy; their respective
+owners retain all trademark rights.
+
+aws.svg
+  Source media page: https://commons.wikimedia.org/wiki/File:Amazon_Web_Services_Logo.svg
+  Download: https://upload.wikimedia.org/wikipedia/commons/9/93/Amazon_Web_Services_Logo.svg
+  Mark: Amazon Web Services wordmark and smile.
+
+google-cloud.svg
+  Source media page: https://commons.wikimedia.org/wiki/File:Google_Cloud_logo.svg
+  Download: https://upload.wikimedia.org/wikipedia/commons/5/51/Google_Cloud_logo.svg
+  Mark: Google Cloud multicolor cloud and wordmark.
+
+azure.svg
+  Source media page: https://commons.wikimedia.org/wiki/File:Microsoft_Azure_Logo.svg
+  Download: https://upload.wikimedia.org/wikipedia/commons/a/a8/Microsoft_Azure_Logo.svg
+  Mark: Microsoft Azure mark and wordmark.
+
+minio.svg
+  Source: https://github.com/minio/minio/blob/master/.github/logo.svg
+  Download: https://raw.githubusercontent.com/minio/minio/master/.github/logo.svg
+  Mark: MinIO Fresh Raspberry wordmark.

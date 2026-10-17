@@ -2,7 +2,15 @@ name: Verify
 
 on:
   push:
+    paths-ignore:
+      - "**/*.md"
+      - "site/**"
+      - ".github/assets/**"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "site/**"
+      - ".github/assets/**"
 
 permissions:
   contents: read

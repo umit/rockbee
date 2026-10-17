@@ -3,258 +3,370 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f8f7f3">
-  <title>Rockbee — Object storage. A simple key-value API.</title>
-  <meta name="description" content="A simple key-value service with durable object storage and independent readers. Built in Rust on SlateDB.">
+  <meta name="theme-color" content="#f6f7f4">
+  <title>Rockbee — Simple by key. Powerful with SQL.</title>
+  <meta name="description" content="A Rust database for byte values, flexible JSON, and DuckDB SQL. Shared object storage. Independent readers. One small client API.">
   <link rel="canonical" href="https://umitunal.net/rockbee/">
-  <meta property="og:type" content="website">
   <meta property="og:site_name" content="Rockbee">
-  <meta property="og:title" content="Rockbee — Object storage. A simple key-value API.">
-  <meta property="og:description" content="A simple key-value service with durable object storage and independent readers. Built in Rust on SlateDB.">
   <meta property="og:url" content="https://umitunal.net/rockbee/">
+  <meta property="og:title" content="Rockbee — Simple by key. Powerful with SQL.">
+  <meta property="og:description" content="Key-value storage and JSON tables with SQL, built on shared object storage and independent reader compute.">
+  <meta property="og:type" content="website">
   <meta property="og:image" content="https://umitunal.net/rockbee/assets/rockbee-logo.png">
-  <meta property="og:image:alt" content="Rockbee amber bee and stone logo">
+  <meta property="og:image:alt" content="Rockbee bee and honeycomb logo">
   <meta name="twitter:card" content="summary_large_image">
-  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="styles.css?v=c1f09e96b827">
-  <script src="script.js" defer></script>
+  <link rel="icon" href="assets/favicon.svg?v=f01594a54b8c" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css?v=e5f094b3d663">
+  <link rel="stylesheet" href="assets/syntax.css">
+  <link rel="stylesheet" href="assets/ai-section.css?v=5052d71871a1">
+  <script src="assets/prism.js" defer></script>
+  <script src="assets/syntax.js" defer></script>
+  <script src="script.js?v=f0ef968acb39" defer></script>
+  <script src="assets/ai-section.js?v=90857beffdb4" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#main">Skip to content</a>
-  <header class="site-header wrap">
-    <a class="brand" href="./" aria-label="Rockbee home"><img src="assets/rockbee-logo.png" alt="Rockbee" width="2007" height="784"></a>
-    <nav aria-label="Main navigation">
-      <a href="#how-it-works">How it works</a>
-      <a href="#try-it">Try it locally</a>
-      <a class="nav-github" href="https://github.com/umit/rockbee">GitHub <span aria-hidden="true">↗</span></a>
-    </nav>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="header shell">
+    <a class="brand" href="./" aria-label="Rockbee home"><svg class="brand-logo" viewBox="120 145 1810 445" aria-hidden="true"><image href="assets/rockbee-logo-transparent.png" width="2007" height="784"/></svg></a>
+    <nav aria-label="Main navigation"><a href="#interface">Interface</a><a href="#architecture">Architecture</a><a href="#ai">For AI</a><a href="#try-it">Get started</a><a class="source-link" href="https://github.com/umit/rockbee">GitHub <span aria-hidden="true">↗</span></a></nav>
   </header>
-
   <main id="main">
-    <section class="hero wrap" aria-labelledby="hero-title">
-      <div class="hero-copy">
-        <p class="eyebrow"><span class="hex" aria-hidden="true"></span> SIMPLE KV API. SHARED OBJECT STORAGE.</p>
-        <h1 id="hero-title">Object storage.<br>A simple<br><span class="highlight">key-value API.</span></h1>
-        <p class="hero-description">A simple key-value service with durable object storage and independent readers. Built in Rust on SlateDB.</p>
-        <div class="actions">
-          <a class="button primary" href="#try-it">Try it locally <span aria-hidden="true">→</span></a>
-          <a class="button secondary" href="https://github.com/umit/rockbee">Explore the code <span aria-hidden="true">↗</span></a>
+    <section class="hero shell" aria-labelledby="hero-title">
+      <div class="hero-eyebrow"><span class="eyebrow"><i aria-hidden="true"></i> A MODERN, DISAGGREGATED DATABASE.</span><span class="edition">OPEN SOURCE / BUILT IN RUST</span></div>
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <h1 id="hero-title">Simple by key.<br><span>Powerful<br class="desktop-break"> with SQL.</span></h1>
+          <p class="lead">Store application data by key. Query JSON with SQL. Keep durable data in object storage, and scale your readers as your application grows.</p>
+          <div class="actions"><a class="button" href="#try-it">Start building <span aria-hidden="true">↗</span></a><a class="text-link" href="#interface">Meet the API <span aria-hidden="true">↓</span></a></div>
+          <p class="hero-footnote">Rust client. SlateDB persistence. DuckDB queries.</p>
         </div>
-        <p class="pilot-note"><span class="status-dot" aria-hidden="true"></span> Active local pilot · Validated with Docker LocalStack</p>
-      </div>
-
-      <div class="architecture-panel" id="architecture">
-        <div class="panel-heading"><span class="mono">01 / FOLLOW A REQUEST</span><span class="small-label">One dataset. Separate roles.</span></div>
-        <div class="flow-controls" role="group" aria-label="Explore a request path" hidden>
-          <button type="button" data-flow="put" aria-pressed="true">PUT</button>
-          <button type="button" data-flow="get" aria-pressed="false">GET</button>
-          <button type="button" data-flow="delete" aria-pressed="false">DELETE</button>
-        </div>
-        <svg class="architecture" data-active="put" viewBox="0 0 520 432" role="img" aria-labelledby="diagram-title diagram-description">
-          <title id="diagram-title">Rockbee: one writer, independent readers, shared object storage</title>
-          <desc id="diagram-description">Client requests reach the gateway. PUT and DELETE go to the writer, which persists through SlateDB to object storage. GET goes to a reader with its own RAM cache. Readers follow updates and fetch data from the same object storage.</desc>
-          <defs>
-            <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="0.7" fill="#d6d3ca"/></pattern>
-            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/></marker>
-          </defs>
-          <rect width="520" height="432" fill="url(#grid)"/>
-          <g class="connections" fill="none" stroke-width="2" marker-end="url(#arrow)">
-            <path class="route-common" d="M260 63V112"/>
-            <path class="route-write" d="M260 163V190H105V220"/>
-            <path class="route-read" d="M260 163V190H412V220"/>
-            <path class="route-write" d="M105 290V382H145"/>
-            <path class="route-read" d="M375 382H412V302"/>
-          </g>
-          <g class="diagram-label">
-            <text x="273" y="91">multiplexed TCP</text>
-            <text x="27" y="181">PUT / DELETE</text>
-            <text x="453" y="181" text-anchor="end">GET</text>
-            <text x="29" y="332">persist</text>
-            <text x="427" y="332">follow</text>
-            <text x="427" y="349">+ fetch</text>
-          </g>
-          <g class="node">
-            <rect x="183" y="15" width="154" height="48" rx="7"/>
-            <text class="node-title" x="260" y="45" text-anchor="middle">Client</text>
-          </g>
-          <g class="node gateway-node">
-            <rect x="168" y="112" width="184" height="51" rx="7"/>
-            <text class="node-title" x="260" y="144" text-anchor="middle">Gateway</text>
-          </g>
-          <g class="node writer-node">
-            <rect x="22" y="220" width="166" height="70" rx="7"/>
-            <text class="node-title" x="105" y="248" text-anchor="middle">One writer</text>
-            <text class="node-subtitle" x="105" y="270" text-anchor="middle">SlateDB</text>
-          </g>
-          <g class="node reader-node">
-            <rect class="reader-back" x="322" y="230" width="177" height="72" rx="7"/>
-            <rect x="316" y="220" width="177" height="72" rx="7"/>
-            <text class="node-title" x="404" y="248" text-anchor="middle">N readers</text>
-            <text class="node-subtitle" x="404" y="270" text-anchor="middle">SlateDB + RAM cache</text>
-          </g>
-          <g class="node storage-node">
-            <rect x="145" y="357" width="230" height="51" rx="7"/>
-            <text class="node-title" x="260" y="380" text-anchor="middle">Object storage</text>
-            <text class="node-subtitle" x="260" y="398" text-anchor="middle">Shared WAL + SST files</text>
-          </g>
-        </svg>
-        <div class="flow-explanation" aria-live="polite" aria-atomic="true">
-          <span class="flow-number" id="flow-method">PUT</span>
-          <p id="flow-description">The writer persists your bytes through SlateDB. A successful response means the write is durable; readers may still be catching up.</p>
-        </div>
-        <p class="diagram-caption">Architecture schematic · one writer per storage prefix</p>
+        <figure class="hero-art">
+          <svg viewBox="0 0 560 500" role="img" aria-labelledby="art-title art-desc">
+            <title id="art-title">Independent compute. One shared foundation.</title><desc id="art-desc">A writer and two independent readers connect to one shared object store. The writer uses SlateDB; readers serve lookups and DuckDB SQL.</desc>
+            <defs>
+              <pattern id="dots" width="18" height="18" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".65" fill="#c9d1d2"/></pattern>
+              <pattern id="floor" width="24" height="24" patternUnits="userSpaceOnUse" patternTransform="matrix(1 .5 -1 .5 0 0)"><path d="M24 0H0V24" fill="none" stroke="#94a8ee" stroke-width=".7"/></pattern>
+              <symbol id="compute" viewBox="0 0 120 132"><path d="m2 34 58-31 58 31-58 31Z" fill="#fff" stroke="#677c98"/><path d="m2 34 58 31v63L2 97Z" fill="#e9eeef" stroke="#677c98"/><path d="m60 65 58-31v63l-58 31Z" fill="#d8e2f0" stroke="#677c98"/><path d="m15 47 29 15m-29-7 29 15m-29-7 29 15" stroke="#8c9ba9"/><path d="m76 80 26-14m-26 22 26-14m-26 22 26-14" stroke="#94a8bc"/><path d="m42 34 18-10 18 10-18 10Z" fill="#e8edff" stroke="#204fe5"/><circle cx="19" cy="87" r="2" fill="#204fe5"/></symbol>
+            </defs>
+            <rect width="560" height="500" fill="url(#dots)" opacity=".65"/>
+            <path d="M28 54V24h70M462 24h70v30M28 446v30h70m364 0h70v-30" stroke="#b4c0c5" fill="none"/>
+            <text x="28" y="15" class="svg-micro">COMPUTE / INDEPENDENT</text><text x="532" y="15" text-anchor="end" class="svg-micro">01 — 03</text>
+            <path d="m115 208 1 65 164 88m0-201v160m165-91v48l-165 89" fill="none" stroke="#204fe5" stroke-width="1.4"/>
+            <path d="m75 364 205-110 205 110v25L280 499 75 389Z" fill="#ccd8ff" stroke="#738fdf"/>
+            <path d="m75 364 205 110 205-110M280 474v25" fill="none" stroke="#738fdf"/>
+            <path d="m75 337 205-110 205 110v25L280 472 75 362Z" fill="#dce5ff" stroke="#738fdf"/>
+            <path d="m75 337 205 110 205-110M280 447v25" fill="none" stroke="#738fdf"/>
+            <path d="m75 310 205-110 205 110v25L280 445 75 335Z" fill="#204fe5" stroke="#204fe5"/>
+            <path d="m75 310 205 110 205-110M280 420v25" fill="none" stroke="#5276eb"/>
+            <path d="m75 310 205-110 205 110-205 110Z" fill="url(#floor)"/>
+            <path d="m181 308 99-53 99 53-99 53Z" fill="#204fe5" stroke="#a7bbff" stroke-width="1"/>
+            <path d="m258 308 22-12 22 12-22 12Z" fill="#fff" opacity=".9"/>
+            <use href="#compute" x="63" y="93" width="104" height="115"/>
+            <use href="#compute" x="228" y="44" width="104" height="115"/>
+            <use href="#compute" x="393" y="113" width="104" height="115"/>
+            <text x="115" y="78" text-anchor="middle" class="svg-label">WRITER</text><text x="280" y="29" text-anchor="middle" class="svg-label">READER</text><text x="445" y="98" text-anchor="middle" class="svg-label">+ READER</text>
+            <path d="M75 352H28m457 0h47" stroke="#a5b3b8"/><text x="28" y="370" class="svg-micro">SHARED</text><text x="532" y="370" text-anchor="end" class="svg-micro">DURABLE</text>
+          </svg>
+          <figcaption><span><b>Keep the data. Choose the compute.</b></span><span>One shared S3-compatible store</span></figcaption>
+        </figure>
       </div>
     </section>
+    <div class="capabilities shell" aria-label="Core capabilities"><span><b>01</b> Opaque byte values</span><span><b>02</b> Flexible JSON tables</span><span><b>03</b> Real DuckDB SQL</span><span><b>04</b> Independent readers</span></div>
 
-    <div class="capability-strip">
-      <div class="wrap strip-inner"><span><b>PUT · GET · DELETE</b> <span>Opaque bytes</span></span><span><b>Optional TTL</b> <span>Expire on reads</span></span><span><b>Async Rust client</b> <span>Bounded multiplexing</span></span></div>
-    </div>
+    <section class="section shell" id="interface" aria-labelledby="interface-title">
+      <div class="section-heading"><div><p class="eyebrow">01 / THE INTERFACE</p><h2 id="interface-title">Look up by key.<br>Explore with SQL.</h2></div><p>Product catalogs, application content, or saved model outputs. Use one client to fetch a record by key and query JSON fields with SQL.</p></div>
+      <div class="workbench">
+        <div class="workbench-tabs" role="tablist" aria-label="Explore the API"><button id="tab-json" role="tab" aria-selected="true" aria-controls="pane-json" tabindex="0" data-api="json">JSON tables <span>{ }</span></button><button id="tab-kv" role="tab" aria-selected="false" aria-controls="pane-kv" tabindex="-1" data-api="kv">Key-value <span>→</span></button><button id="tab-sql" role="tab" aria-selected="false" aria-controls="pane-sql" tabindex="-1" data-api="sql">SQL queries <span>∑</span></button><span class="workbench-label">ROCKBEECLIENT / RUST</span></div>
+        <div class="api-pane" role="tabpanel" id="pane-json" aria-labelledby="tab-json" tabindex="0">
+          <div class="api-copy"><span class="small-label">SCHEMA-FREE DOCUMENTS</span><h3>Your fields.<br>Your next idea.</h3><p>Put a JSON object. Get a UUID back. Add different fields to the next document, or use your own ID for a replacement.</p><ul class="ticks"><li>Nested objects and arrays</li><li>Generated or caller-supplied IDs</li><li>Get, replace, delete, and optional TTL</li></ul></div>
+          <div class="code-card"><div class="code-top"><span>products.rs</span><button type="button" class="copy" data-copy="json-code" aria-label="Copy JSON example">Copy ↗</button></div><pre tabindex="0"><code id="json-code" class="language-rust">let products = client.table("products");
 
-    <section class="section wrap" id="how-it-works" aria-labelledby="how-title">
-      <div class="section-intro">
-        <p class="eyebrow">THE ARCHITECTURE</p>
-        <h2 id="how-title">Storage outlives<br>the process.</h2>
-        <p>Provision read-serving compute separately from durable storage. Add readers as serving demand changes, while the dataset stays in shared object storage. SlateDB handles persistence; Rockbee provides the network service and client.</p>
-        <a class="text-link" href="https://github.com/umit/rockbee#how-it-works">Read the architecture notes <span aria-hidden="true">↗</span></a>
+let write = products.put(&amp;json!({
+    "name": "Keyboard",
+    "price": 99.5,
+    "brand": "Logitech"
+}));
+
+let id = write.await?; // Durable acknowledgement.
+let document = products.get(&amp;id).await?;</code></pre><div class="code-caption">Different documents can have different fields. Reads are eventual.</div></div>
+        </div>
+        <div class="api-pane" role="tabpanel" id="pane-kv" aria-labelledby="tab-kv" tabindex="0" hidden>
+          <div class="api-copy"><span class="small-label">E-COMMERCE / SAVED CARTS</span><h3>Keep their cart.<br>Welcome them back.</h3><p>Save a customer's shopping cart under a key. Fetch it when they return, and remove it after checkout. A TTL expires abandoned carts automatically.</p><ul class="ticks"><li>Key: <code>cart:customer-42</code></li><li>Value: the cart encoded as JSON bytes</li><li>Expires 30 minutes after this write</li></ul><div class="sample-result"><span class="small-label">WHAT YOUR APPLICATION STORES</span><pre><code class="language-json">{
+  "items": [
+    {"sku": "keyboard-01", "quantity": 2}
+  ]
+}</code></pre></div></div>
+          <div class="code-card"><div class="code-top"><span>shopping_cart.rs</span><button type="button" class="copy" data-copy="kv-code" aria-label="Copy key-value example">Copy ↗</button></div><pre tabindex="0"><code id="kv-code" class="language-rust">let cart_key = b"cart:customer-42";
+
+// Save the cart for 30 minutes.
+client.put(
+    cart_key,
+    br#"{"items":[{"sku":"keyboard-01","quantity":2}]}"#,
+    Some(std::time::Duration::from_secs(30 * 60)),
+).await?;
+
+// Load it when the customer returns.
+// A recent write may not be visible to the reader yet.
+let cart_bytes = client.get(cart_key).await?;
+
+// After checkout is complete, remove the saved cart.
+client.delete(cart_key).await?;</code></pre><div class="code-caption">GET returns the stored bytes, or <code>None</code> when no cart is visible. Your application decodes the JSON. PUT and DELETE await durable acknowledgements; reader visibility is eventual.</div></div>
+        </div>
+        <div class="api-pane" role="tabpanel" id="pane-sql" aria-labelledby="tab-sql" tabindex="0" hidden>
+          <div class="api-copy"><span class="small-label">WRITE ONCE / TWO WAYS TO READ</span><h3>From a document<br>to an answer.</h3><p>Start with a JSON product. Fetch the document by ID, or ask a question across the table with SQL.</p>
+            <ol class="sql-steps">
+              <li><b>Put the document.</b><p><code>put</code> starts the write and generates a UUID. Awaiting its handle returns that ID after a durable acknowledgement.</p></li>
+              <li><b>Get it by ID.</b><p><code>get(&amp;id)</code> returns the original JSON object from a reader. A new write can return <code>None</code> until that reader catches up.</p></li>
+              <li><b>Query the table.</b><p><code>query(sql)</code> runs your SELECT in DuckDB on a reader. This example finds products under 100 and returns only <code>name</code> and <code>price</code>, ordered by price.</p></li>
+            </ol>
+            <div class="sample-result"><span class="small-label">GET / DOCUMENT ONCE VISIBLE</span><pre><code class="language-json">{
+  "name": "Keyboard",
+  "price": 99.5,
+  "brand": "Logitech"
+}</code></pre></div>
+            <p class="query-result-note">The SELECT aliases become JSON keys. <code>brand</code> stays in the stored document; this query does not select it. Other matching products produce more rows.</p>
+          </div>
+          <div class="code-card"><div class="code-top"><span>catalog.rs · put → get → query</span><button type="button" class="copy" data-copy="sql-code" aria-label="Copy SQL example">Copy ↗</button></div><pre tabindex="0"><code id="sql-code" class="language-rust">use serde_json::json;
+
+let products = client.table("products");
+
+// 1. Write JSON. Await a durable acknowledgement.
+let write = products.put(&amp;json!({
+    "name": "Keyboard",
+    "price": 99.5,
+    "brand": "Logitech"
+}));
+let id = write.await?;
+
+// 2. Read the original document by ID.
+// May be None until the reader catches up.
+let document = products.get(&amp;id).await?;
+
+// 3. Query the published table with real SQL.
+// The latest write may not be published yet.
+let result = products.query(
+    "SELECT value-&gt;&gt;'name' AS name,
+            TRY_CAST(value-&gt;&gt;'price' AS DOUBLE) AS price
+     FROM products
+     WHERE TRY_CAST(value-&gt;&gt;'price' AS DOUBLE) &lt; 100
+     ORDER BY price"
+).await?;
+
+println!("{}", serde_json::to_string(&amp;result.rows)?);</code></pre><div class="query-output"><div class="query-output-heading"><span>EXAMPLE RESULT</span><span>result.rows · after publication</span></div><pre tabindex="0"><code class="language-json">[
+  {
+    "name": "Keyboard",
+    "price": 99.5
+  }
+]</code></pre></div><div class="code-caption"><code>value</code> holds the stored JSON. <code>-&gt;&gt;</code> extracts a field as text; <code>TRY_CAST</code> converts price to a number for filtering and sorting. Each selected row becomes a JSON object in <code>result.rows</code>.</div></div>
+          <div class="sql-visibility"><b>Durable now. Query-visible after publication.</b><p>The writer publishes Parquet in the background. A query made immediately after PUT can see older data or report that the table is warming up. If you need this new record, retry the read/query with a deadline; never replay an uncertain write. The <a href="https://github.com/umit/rockbee/blob/main/crates/rockbee-client/examples/tables.rs">full SDK example</a> shows bounded polling.</p></div>
+        </div>
       </div>
-      <div class="principles">
-        <article class="principle"><span class="step">01</span><div><h3>Write through one writer.</h3><p>The gateway routes PUT and DELETE to the writer for a storage prefix. Success is returned after SlateDB confirms durability in object storage.</p></div></article>
-        <article class="principle"><span class="step">02</span><div><h3>Read through independent readers.</h3><p>GET requests are distributed round-robin. Each reader has its own SlateDB state and RAM cache, backed by the same stored data. The gateway has no key-value cache.</p></div></article>
-        <article class="principle"><span class="step">03</span><div><h3>Allow updates time to arrive.</h3><p>Readers follow manifests and WAL updates asynchronously. A durable write can still read as an older value or a miss until a reader catches up.</p></div></article>
-      </div>
+      <div class="interface-bottom"><p>Connect once with <code>RockBeeClient::connect(addr).await?</code></p><a class="text-link" href="https://github.com/umit/rockbee/blob/main/crates/rockbee-client/examples/tables.rs">Run the full SDK example <span aria-hidden="true">↗</span></a></div>
     </section>
 
-    <section class="disaggregation wrap" id="why-disaggregation" aria-labelledby="disaggregation-title">
-      <div class="section-top">
-        <div><p class="eyebrow">WHY DISAGGREGATION MATTERS</p><h2 id="disaggregation-title">Let data and traffic<br>grow independently.</h2></div>
-        <p>Disaggregated architecture separates the machines serving requests from the storage that keeps data durable. Dataset size and serving capacity become separate planning decisions.</p>
+    <section class="scale-section" id="scaling" aria-labelledby="scale-title"><div class="shell">
+      <div class="section-heading"><div><p class="eyebrow">02 / ROOM TO GROW</p><h2 id="scale-title">More readers.<br>Same durable dataset.</h2></div><p>Read demand and data size are different things. Provision reader compute separately, without a full durable copy of the dataset for each reader.</p></div>
+      <div class="scale-explorer"><div class="scale-toolbar"><span class="small-label">EXPLORE THE TOPOLOGY</span><div class="reader-control"><button type="button" id="remove-reader" aria-label="Remove a reader" disabled>−</button><span id="reader-count" aria-live="polite">1 reader</span><button type="button" id="add-reader" aria-label="Add a reader">+</button></div></div>
+        <div class="compute-row"><div class="compute-node writer-compute"><span class="node-icon" aria-hidden="true">↘</span><b>Writer</b><small>SlateDB + Parquet export</small></div><div class="reader-pool" id="reader-pool"><div class="compute-node"><span class="node-icon" aria-hidden="true">↗</span><b>Reader 01</b><small>GET + SQL · local cache</small></div></div></div>
+        <div class="shared-store"><div class="storage-glyph" aria-hidden="true"><i></i><i></i><i></i></div><div><b>One shared object store</b><span>S3-compatible · SlateDB WAL + SST · published Parquet</span></div><span class="store-constant">DATA STAYS HERE</span></div>
+        <div class="storage-providers" aria-label="Object storage compatibility">
+          <div class="storage-provider provider-aws"><div class="provider-logo"><img src="assets/providers/aws.svg" alt="Amazon Web Services" width="64" height="38" loading="lazy"></div><div><b>Amazon S3</b><span class="provider-ready">S3 backend available</span></div></div>
+          <div class="storage-provider"><div class="provider-logo"><img src="assets/providers/google-cloud.svg" alt="Google Cloud" width="168" height="26" loading="lazy"></div><div><b>Cloud Storage</b><span>Not yet integrated</span></div></div>
+          <div class="storage-provider"><div class="provider-logo"><img src="assets/providers/azure.svg" alt="Microsoft Azure" width="122" height="35" loading="lazy"></div><div><b>Blob Storage</b><span>Not yet integrated</span></div></div>
+          <div class="storage-provider provider-minio"><div class="provider-logo"><img src="assets/providers/minio.svg" alt="MinIO" width="140" height="21" loading="lazy"></div><div><b>MinIO</b><span>S3-compatible storage</span></div></div>
+          <div class="storage-provider provider-custom"><div class="provider-logo provider-custom-logo"><svg viewBox="0 0 36 36" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><ellipse cx="18" cy="8" rx="13" ry="5"/><path d="M5 8v20c0 2.76 5.82 5 13 5s13-2.24 13-5V8M5 18c0 2.76 5.82 5 13 5s13-2.24 13-5"/></svg><span>Your storage</span></div><div><b>Custom storage</b><span>Your S3-compatible endpoint</span></div></div>
+          <p class="provider-note"><strong>MinIO or your S3-compatible storage.</strong> Connect through the S3 backend. Local development also supports LocalStack and local files. Validate your chosen provider with your workload.</p>
+        </div>
+        <div class="scale-caption"><p id="scale-note">One writer, one reader. Separate processes, shared durable data.</p><span>Illustrative topology · readers are configured explicitly</span></div>
       </div>
-      <div class="use-case-grid">
-        <article><span class="use-symbol" aria-hidden="true">01</span><h3>Size compute for demand.</h3><p>Add readers against the same stored dataset as read traffic grows. Each new reader does not need its own full durable copy.</p></article>
-        <article><span class="use-symbol" aria-hidden="true">02</span><h3>Keep hot data close.</h3><p>Each reader caches frequently accessed data in RAM. The full dataset can exceed cache capacity; cold reads fetch from object storage.</p></article>
-        <article><span class="use-symbol" aria-hidden="true">03</span><h3>Replace compute. Keep data.</h3><p>A replacement reader opens the existing dataset. It still needs to load metadata, catch up, and warm its cache before steady-state performance.</p></article>
+      <div class="scale-benefits"><div><span>01</span><h3>Size compute for the work.</h3><p>Choose writer and reader resources independently. Add read-serving processes as your workload needs them.</p></div><div><span>02</span><h3>Keep durable data in place.</h3><p>A new reader opens the shared dataset and builds its local cache. Durable storage stays separate from the process.</p></div><div><span>03</span><h3>Replace a process. Keep going.</h3><p>Reader compute is replaceable. Metadata loading, catch-up, and cache warmup still take time.</p></div></div>
+    </div></section>
+
+    <section class="section shell" id="architecture" aria-labelledby="architecture-title">
+      <div class="section-heading"><div><p class="eyebrow">03 / THE FOUNDATION</p><h2 id="architecture-title">Independent compute.<br>Shared durable storage.</h2></div><p>Compute serves requests. Object storage keeps durable data. This is disaggregated architecture: size readers for traffic and storage for the dataset, without a full durable database copy for every reader.</p></div>
+      <dl class="architecture-roles">
+        <div><dt><span>01</span> Gateway</dt><dd>Your client connects here. It sends PUT and DELETE to the writer, and GET and SQL to readers.</dd></div>
+        <div><dt><span>02</span> One writer</dt><dd>Owns mutations for a storage prefix. SlateDB makes writes durable. The writer also uses DuckDB to export JSON table data into Parquet in the background.</dd></div>
+        <div><dt><span>03</span> Independent readers</dt><dd>Serve lookups and queries with their own compute and local caches. Add reader processes as read demand grows.</dd></div>
+        <div><dt><span>04</span> Object storage</dt><dd>Holds shared durable files: SlateDB write logs and data files, plus the Parquet projection used for SQL.</dd></div>
+      </dl>
+      <div class="architecture-plate" data-path="write"><div class="plate-toolbar"><span class="small-label">FOLLOW A REQUEST</span><div class="path-controls" role="group" aria-label="Request path"><button type="button" data-path="write" aria-pressed="true">PUT / DELETE</button><button type="button" data-path="get" aria-pressed="false">GET</button><button type="button" data-path="sql" aria-pressed="false">SQL</button></div></div>
+        <div class="request-graph" aria-label="Client to gateway, writer and readers, then shared object storage"><div class="graph-client"><span>CLIENT</span><b>RockBeeClient</b></div><span class="graph-arrow" aria-hidden="true">→</span><div class="graph-gateway"><span>ROUTING</span><b>Gateway</b></div><span class="graph-arrow" aria-hidden="true">→</span><div class="graph-roles"><div class="graph-writer"><span>WRITE + EXPORT</span><b>Writer <small>SlateDB / DuckDB</small></b></div><div class="graph-reader"><span>READ + QUERY</span><b>Readers <small>SlateDB / DuckDB</small></b></div></div><span class="graph-arrow" aria-hidden="true">↔</span><div class="graph-storage"><span>DURABLE DATA</span><b>Object storage</b><small>S3-compatible · WAL · SST · Parquet</small></div></div>
+        <div class="sql-pipeline" id="sql-pipeline" hidden>
+          <div class="sql-stage"><span class="small-label">01 / BACKGROUND PUBLICATION</span><h3>Writer prepares the data.</h3><div class="sql-route">Writer / DuckDB <span aria-hidden="true">→</span> Parquet <span aria-hidden="true">→</span> Object storage</div><p>The writer's export worker uses DuckDB to turn table data into Parquet files and publishes them in object storage. This runs separately from the durable PUT acknowledgement.</p></div>
+          <div class="sql-stage"><span class="small-label">02 / WHEN YOU CALL QUERY</span><h3>Reader answers the question.</h3><div class="sql-route">Gateway <span aria-hidden="true">→</span> Reader / DuckDB <span aria-hidden="true">→</span> JSON rows</div><p>The gateway sends your SELECT to a reader. Its DuckDB engine reads the published Parquet projection and returns the selected columns. It does not wait for a fresh export on each query.</p></div>
+        </div>
+        <div class="path-detail" aria-live="polite"><span id="path-label" class="small-label">WRITE → DURABLE ACK</span><p id="path-description">Client → gateway → writer. SlateDB persists the mutation in object storage before the writer acknowledges success. Readers catch up independently; the writer publishes the SQL projection in the background.</p></div>
       </div>
-      <aside class="capacity-example" aria-label="E-commerce capacity example"><strong>A sale changes traffic, not necessarily catalog size.</strong><p>Provision more readers for product-card lookups while keeping the same durable dataset. Today, operators configure reader membership explicitly.</p></aside>
-      <p class="fit-note">The tradeoffs: cold-read latency, duplicated hot data across reader caches, and object-store request and transfer costs. Rockbee still has one writer per prefix and eventual reader visibility. Savings and throughput gains depend on the workload.</p>
-      <a class="text-link" href="https://slatedb.io/blog/introducing-slatedb/">Explore the design in SlateDB <span aria-hidden="true">↗</span></a>
+      <div class="architecture-example"><span class="small-label">WHAT THIS MEANS IN PRACTICE</span><h3>More read traffic? Add reader compute.</h3><p>Configure another reader against the same storage prefix and include it in the gateway's reader list. It opens the shared dataset and warms its own cache. You do not need a full durable replica for every reader, and adding a reader does not require increasing writer compute.</p><p class="architecture-note">Reader provisioning is explicit. Catch-up and cache warmup take time; capacity depends on your workload and the rest of the system.</p></div>
+      <div class="two-paths"><div><span class="small-label">GET / THE ORIGINAL VALUE</span><h3>SlateDB serves the key.</h3><p>A reader looks up the byte key or document ID through SlateDB. Its local cache keeps frequently used data close; shared object storage supplies the durable files. Readers follow the writer's updates, so a recent write may not be visible immediately.</p><a class="text-link" href="https://github.com/umit/rockbee/tree/main/apps/rockbee-reader">Explore the reader <span aria-hidden="true">↗</span></a></div><div><span class="small-label">SQL / WRITER + READER</span><h3>Writer publishes. Reader queries.</h3><p>DuckDB has a job on both sides. The writer uses it to create Parquet files from JSON table data and publishes those files asynchronously. On a reader, DuckDB runs your SELECT over the published projection and returns JSON rows. The export and the query are separate operations.</p><a class="text-link" href="https://github.com/umit/rockbee/tree/main/crates/rockbee-query">Explore the query engine <span aria-hidden="true">↗</span></a></div></div>
     </section>
 
-    <section class="code-section" aria-labelledby="api-title">
-      <div class="wrap code-layout">
-        <div class="code-intro"><p class="eyebrow">BYTES IN. BYTES OUT.</p><h2 id="api-title">Your data.<br>Your encoding.</h2><p>Keep the connection. Submit a write. Collect its result. The client correlates responses on a shared TCP connection.</p><p>Keys and values are nonempty byte arrays. Encode JSON, Protobuf, or your own format in your application.</p><a class="text-link" href="https://github.com/umit/rockbee/tree/main/crates/rockbee-client">Explore the Rust client <span aria-hidden="true">↗</span></a></div>
-        <div class="code-window">
-          <div class="code-heading"><span><span class="code-dot" aria-hidden="true"></span> main.rs</span><button class="copy-button" type="button" data-copy="rust-example" hidden aria-label="Copy Rust example">Copy</button></div>
-          <pre><code id="rust-example"><span class="syntax-keyword">use</span> rockbee_client::{Client, Result};
+    <section class="ai-section" id="ai" aria-labelledby="ai-title">
+      <div class="shell">
+        <div class="section-heading ai-heading">
+          <div><p class="eyebrow">04 / AI APPLICATIONS</p><h2 id="ai-title">Keep the context.<br>Query the results.</h2></div>
+          <p>Your models produce more than answers. Store their outputs, saved context, evaluations, and chat or agent logs. Retrieve by key. Explore with SQL.</p>
+        </div>
 
-#[tokio::main]
-<span class="syntax-keyword">async fn</span> main() -&gt; Result&lt;()&gt; {
-    <span class="syntax-keyword">let</span> gateway = std::env::var(<span class="syntax-string">"GATEWAY_ADDR"</span>)?;
-    <span class="syntax-keyword">let</span> client = Client::connect(&amp;gateway).await?;
+        <div class="ai-tabs" role="tablist" aria-label="AI use cases">
+          <button type="button" id="ai-tab-outputs" role="tab" aria-selected="true" aria-controls="ai-panel-outputs" data-ai-tab><span>01</span> Model outputs <b aria-hidden="true">↗</b></button>
+          <button type="button" id="ai-tab-context" role="tab" aria-selected="false" aria-controls="ai-panel-context" tabindex="-1" data-ai-tab><span>02</span> Agent context <b aria-hidden="true">↗</b></button>
+          <button type="button" id="ai-tab-evaluations" role="tab" aria-selected="false" aria-controls="ai-panel-evaluations" tabindex="-1" data-ai-tab><span>03</span> Evaluations <b aria-hidden="true">↗</b></button>
+          <button type="button" id="ai-tab-logs" role="tab" aria-selected="false" aria-controls="ai-panel-logs" tabindex="-1" data-ai-tab><span>04</span> Chat &amp; agent logs <b aria-hidden="true">↗</b></button>
+        </div>
 
-    <span class="syntax-comment">// Starts now. None means no TTL.</span>
-    <span class="syntax-keyword">let</span> write = client.put(<span class="syntax-string">b"product:42"</span>, <span class="syntax-string">b"hello"</span>, None);
-    write.await?; <span class="syntax-comment">// Durable acknowledgement.</span>
-
-    <span class="syntax-comment">// Reader visibility is eventual.</span>
-    <span class="syntax-keyword">let</span> value = client.get(<span class="syntax-string">b"product:42"</span>).await?;
-    println!(<span class="syntax-string">"{value:?}"</span>);
-
-    client.delete(<span class="syntax-string">b"product:42"</span>).await?;
-    client.shutdown().await;
-    Ok(())
+        <div class="ai-panel" id="ai-panel-outputs" role="tabpanel" aria-labelledby="ai-tab-outputs" tabindex="0">
+          <div class="ai-story">
+            <span class="small-label">INFERENCE IS WORK. KEEP THE RESULT.</span>
+            <h3>Generate once.<br>Reuse what fits.</h3>
+            <p>A product description. A document summary. A classification. Save a completed output under a key that identifies the model version and input.</p>
+            <p>When the same result is useful again, your application can fetch it instead of making another model call.</p>
+            <dl class="ai-steps"><div><dt>WRITE</dt><dd>Your pipeline stores the completed result.</dd></div><div><dt>READ</dt><dd>Your application looks up its model-and-input key.</dd></div></dl>
+            <a class="text-link" href="#interface">See the client API <span aria-hidden="true">↗</span></a>
+          </div>
+          <div class="ai-record">
+            <div class="ai-record-top"><span><i aria-hidden="true"></i> MODEL OUTPUT</span><span>EXAMPLE DATA</span></div>
+            <div class="ai-record-key"><span>model_outputs</span><code>catalog-v3:product-42:r7</code></div>
+            <pre tabindex="0"><code class="language-json">{
+  "model_version": "catalog-v3",
+  "input_id": "product-42",
+  "input_revision": 7,
+  "description": "A compact wireless mouse.",
+  "tags": ["wireless", "office"],
+  "language": "en"
 }</code></pre>
-          <div class="code-footer">TCP + Protobuf <span>Request IDs correlate concurrent replies.</span></div>
+            <div class="ai-record-read"><span class="small-label">FETCH BY YOUR KEY</span><pre tabindex="0"><code class="language-rust">let outputs = client.table("model_outputs");
+let output = outputs.get("catalog-v3:product-42:r7").await?;</code></pre></div>
+            <p class="ai-record-note">Include input and model versions in your key so the application can choose the right result.</p>
+          </div>
         </div>
-      </div>
-    </section>
 
-    <section class="section wrap guarantees" id="guarantees" aria-labelledby="guarantees-title">
-      <div class="section-top"><div><p class="eyebrow">EXPLICIT BEHAVIOR</p><h2 id="guarantees-title">Know what the<br>response means.</h2></div><p>Failures are part of the API. These are behaviors you can inspect in the code and exercise locally.</p></div>
-      <div class="guarantee-row"><span class="guarantee-tag">DURABILITY</span><h3>A successful write<br>has persisted.</h3><div><p>PUT and DELETE wait for SlateDB’s durable acknowledgement before returning success.</p><a class="text-link" href="https://github.com/umit/rockbee/blob/main/crates/rockbee-node/src/writer/mod.rs">Inspect the writer <span aria-hidden="true">↗</span></a></div></div>
-      <div class="guarantee-row"><span class="guarantee-tag">UNCERTAINTY</span><h3>A lost ACK is an<br>unknown outcome.</h3><div><p>A write may have succeeded even if its reply never arrives. Mutation errors distinguish NotSent, Rejected, and Unknown. Uncertain writes are never automatically replayed.</p><details><summary>Run the lost-ACK test <span aria-hidden="true">+</span></summary><p>This local test drops replies between gateway and writer. It checks that persisted writes remain visible and are not replayed. It uses a filesystem object-store adapter.</p><pre><code>cargo test --locked -p rockbee-gateway \
-  --test gateway_durability \
-  lost_gateway_writer_acks_are_unknown_without_replaying_durable_mutations</code></pre><a class="text-link" href="https://github.com/umit/rockbee/blob/main/apps/rockbee-gateway/tests/gateway_durability.rs">Read the test <span aria-hidden="true">↗</span></a></details></div></div>
-      <div class="guarantee-row"><span class="guarantee-tag">VISIBILITY</span><h3>Durable now.<br>Visible after catch-up.</h3><div><p>A write acknowledgement and reader visibility are different events. Measure the gap against your running local setup with the visibility probe.</p><pre class="inline-command"><code>make visibility BENCH_ADDR="$GATEWAY_ADDR"</code></pre><a class="text-link" href="https://github.com/umit/rockbee/blob/main/crates/rockbee-client/examples/visibility_probe.rs">Inspect the probe <span aria-hidden="true">↗</span></a></div></div>
-    </section>
-
-    <section class="use-cases wrap" aria-labelledby="use-cases-title">
-      <div class="section-top"><div><p class="eyebrow">WHERE IT FITS</p><h2 id="use-cases-title">Prepare once.<br>Look up by key.</h2></div><p>For read-heavy applications that know the key and can tolerate a delay before updates become visible.</p></div>
-      <div class="use-case-grid">
-        <article><span class="use-symbol" aria-hidden="true">{ }</span><h3>Catalog &amp; content</h3><p>Enriched product cards, descriptive catalog data, and prepared page fragments.</p><code>product:42:card</code></article>
-        <article><span class="use-symbol" aria-hidden="true">[ ]</span><h3>Recommendations &amp; ML</h3><p>Precomputed recommendations, feature vectors, and reusable inference results.</p><code>user:123:recommendations</code></article>
-        <article><span class="use-symbol" aria-hidden="true">∑</span><h3>Reporting &amp; lookups</h3><p>Published report snapshots and slowly changing reference data.</p><code>report:daily:2026-10-11</code></article>
-      </div>
-      <p class="fit-note">Your application prepares and refreshes the values. Rockbee serves them by key. Transactions, compare-and-swap, SQL, and immediate read-after-write visibility are outside this API.</p>
-    </section>
-
-    <section class="section wrap cdc-section" id="cdc" aria-labelledby="cdc-title">
-      <div class="section-intro">
-        <p class="eyebrow">OPTIONAL CHANGE DATA CAPTURE</p>
-        <h2 id="cdc-title">Follow the<br>durable changes.</h2>
-        <p><code>rockbee-cdc</code> uses SlateDB’s WAL reader to export durable PUT and DELETE changes as one JSON event per line. Run it separately when you need a change feed; Rockbee readers work without it.</p>
-        <p>Connect stdout to your own consumer to forward changes to another service. Downstream delivery is handled by that consumer.</p>
-        <a class="text-link" href="https://github.com/umit/rockbee/tree/main/tools/rockbee-cdc#run-locally">Run the CDC exporter <span aria-hidden="true">↗</span></a>
-      </div>
-      <div class="cdc-output">
-        <ol class="cdc-flow" aria-label="CDC data flow">
-          <li>Object storage WAL</li><li aria-hidden="true">→</li><li>rockbee-cdc</li><li aria-hidden="true">→</li><li>JSON lines</li>
-        </ol>
-        <div class="code-window">
-          <div class="code-heading"><span><span class="code-dot" aria-hidden="true"></span> stdout · illustrative events</span><button class="copy-button" type="button" data-copy="cdc-events" hidden aria-label="Copy example CDC events">Copy</button></div>
-          <pre><code id="cdc-events">{"op":"put","key":[107],"value":[118],"seq":1,"wal_file_id":2}
-{"op":"delete","key":[107],"value":null,"seq":2,"wal_file_id":3}</code></pre>
+        <div class="ai-panel" id="ai-panel-context" role="tabpanel" aria-labelledby="ai-tab-context" tabindex="0" hidden>
+          <div class="ai-story">
+            <span class="small-label">CONTEXT YOUR APPLICATION CONTROLS.</span>
+            <h3>Save the useful parts.<br>Bring them back.</h3>
+            <p>Your application chooses the summaries, document references, and tool results worth keeping from a conversation or task.</p>
+            <p>Save that context as a JSON snapshot. A later request or worker can retrieve it by ID and use it to assemble the next prompt.</p>
+            <dl class="ai-steps"><div><dt>CHOOSE</dt><dd>Your application decides what belongs in context.</dd></div><div><dt>RECALL</dt><dd>Fetch the saved snapshot by conversation or task ID.</dd></div></dl>
+            <a class="text-link" href="#interface">Explore JSON tables <span aria-hidden="true">↗</span></a>
+          </div>
+          <div class="ai-record">
+            <div class="ai-record-top"><span><i aria-hidden="true"></i> CONTEXT SNAPSHOT</span><span>EXAMPLE DATA</span></div>
+            <div class="ai-record-key"><span>agent_context</span><code>conversation-42:summary-v3</code></div>
+            <pre tabindex="0"><code class="language-json">{
+  "conversation_id": "conversation-42",
+  "summary": "Looking for a quiet wireless keyboard.",
+  "preferences": {
+    "layout": "US",
+    "budget": 100
+  },
+  "product_ids": ["keyboard-17", "keyboard-28"]
+}</code></pre>
+            <div class="ai-record-read"><span class="small-label">LOAD THE SNAPSHOT YOU SELECTED</span><pre tabindex="0"><code class="language-rust">let context = client.table("agent_context");
+let snapshot = context.get("conversation-42:summary-v3").await?;</code></pre></div>
+            <p class="ai-record-note">Keep the snapshot in the active request when you need it immediately; later reads follow reader catch-up.</p>
+          </div>
         </div>
-        <p class="cdc-caption">Keys and values are byte arrays: <code>[107]</code> is <code>k</code>, and <code>[118]</code> is <code>v</code>. Sequence and WAL numbers vary.</p>
-        <details>
-          <summary>Delivery, retention &amp; TTL <span aria-hidden="true">+</span></summary>
-          <ul class="cdc-limits">
-            <li>A local cursor resumes after the last completed WAL file. A crash can repeat events; consumers must handle duplicates. Stdout does not confirm downstream persistence.</li>
-            <li>The exporter needs retained WAL files. A missing required WAL stops the export; there is no built-in snapshot or backfill.</li>
-            <li>TTL PUTs include <code>expires_at_unix_ms</code>. Expiration itself does not emit a DELETE event; the consumer must check the timestamp.</li>
-          </ul>
-        </details>
-      </div>
-    </section>
 
-    <section class="quickstart-section" id="try-it" aria-labelledby="try-title">
-      <div class="wrap quickstart-layout">
-        <div><p class="eyebrow">TAKE IT FOR A SPIN</p><h2 id="try-title">From source<br>to your first PUT.</h2><p>Start a writer, reader, and gateway on your machine. You’ll need Rust through rustup and Docker Desktop.</p><p class="quick-note">The first build compiles SlateDB and the service binaries. The local runner prints dynamic addresses and uses a unique storage prefix.</p><a class="text-link" href="https://github.com/umit/rockbee#try-it-locally">Full setup guide &amp; existing installations <span aria-hidden="true">↗</span></a></div>
-        <div class="quickstart-steps">
-          <div class="terminal"><div class="terminal-heading"><span>01 / GET THE SOURCE</span><button type="button" class="copy-button" data-copy="clone-command" hidden aria-label="Copy clone commands">Copy</button></div><pre><code id="clone-command">git clone https://github.com/umit/rockbee.git
-cd rockbee</code></pre></div>
-          <div class="terminal"><div class="terminal-heading"><span>02 / START THE LOCAL STACK</span><button type="button" class="copy-button" data-copy="start-command" hidden aria-label="Copy local startup commands">Copy</button></div><p>For a fresh setup, with port 4566 free:</p><pre><code id="start-command">docker compose up -d --wait
-make local</code></pre><p>Already using LocalStack? Follow the setup guide before starting another container. Keep this terminal open.</p></div>
-          <div class="terminal"><div class="terminal-heading"><span>03 / WRITE, THEN READ</span><button type="button" class="copy-button" data-copy="put-command" hidden aria-label="Copy PUT and GET commands">Copy</button></div><p>In a second terminal at the repository root, replace the address below with the gateway address printed above:</p><pre><code id="put-command">export GATEWAY_ADDR='127.0.0.1:PORT_FROM_READY_OUTPUT'
-./target/release/rockbee-client --addr "$GATEWAY_ADDR" put demo:key hello
-./target/release/rockbee-client --addr "$GATEWAY_ADDR" get demo:key</code></pre><p>The first GET can be a miss. Repeat it after the reader catches up. Stop the local runner with Ctrl-C.</p></div>
+        <div class="ai-panel" id="ai-panel-evaluations" role="tabpanel" aria-labelledby="ai-tab-evaluations" tabindex="0" hidden>
+          <div class="ai-story">
+            <span class="small-label">FROM INDIVIDUAL RUNS TO A CLEARER VIEW.</span>
+            <h3>Keep every result.<br>Ask better questions.</h3>
+            <p>Write evaluation records with the model version, dataset, score, and the fields that matter to your team. Different runs can carry different JSON fields.</p>
+            <p>After publication, use DuckDB SQL to compare model versions, filter a dataset, or aggregate scores across runs.</p>
+            <dl class="ai-steps"><div><dt>RECORD</dt><dd>Your evaluator writes a JSON document for each run.</dd></div><div><dt>COMPARE</dt><dd>SQL returns the selected columns as JSON rows.</dd></div></dl>
+            <a class="text-link" href="#interface">See how SQL works <span aria-hidden="true">↗</span></a>
+          </div>
+          <div class="ai-record ai-query">
+            <div class="ai-record-top"><span><i aria-hidden="true"></i> EVALUATIONS / SQL</span><span>EXAMPLE DATA</span></div>
+            <pre tabindex="0"><code class="language-sql">SELECT
+  value-&gt;&gt;'model_version' AS model_version,
+  COUNT(*) AS runs,
+  ROUND(AVG(TRY_CAST(
+    value-&gt;&gt;'score' AS DOUBLE
+  )), 3) AS average_score
+FROM evaluations
+WHERE value-&gt;&gt;'dataset' = 'support-v2'
+GROUP BY 1
+ORDER BY average_score DESC</code></pre>
+            <div class="ai-query-result"><span class="small-label">ILLUSTRATIVE RESULT · AFTER PUBLICATION</span><table><thead><tr><th>model_version</th><th>runs</th><th>average_score</th></tr></thead><tbody><tr><td>assistant-v3</td><td>120</td><td>0.931</td></tr><tr><td>assistant-v2</td><td>120</td><td>0.884</td></tr></tbody></table></div>
+            <p class="ai-record-note">The writer publishes JSON table data as Parquet. Readers query that published view.</p>
+          </div>
         </div>
+
+<div class="ai-panel" id="ai-panel-logs" role="tabpanel" aria-labelledby="ai-tab-logs" tabindex="0" hidden>
+          <div class="ai-story">
+            <span class="small-label">THE CONVERSATION AND THE WORK BEHIND IT.</span>
+            <h3>Keep the messages.<br>Follow the run.</h3>
+            <p>Store chat messages, tool calls, and agent results as JSON events. Group them by conversation and run so the useful details stay connected.</p>
+            <p>Your application writes each event with its own ID and sequence. After publication, query a run to see what was said, which tools were used, and how they finished.</p>
+            <dl class="ai-steps"><div><dt>CAPTURE</dt><dd>Write the message or event your application produces.</dd></div><div><dt>INSPECT</dt><dd>Filter by run ID, event type, tool, or status with SQL.</dd></div></dl>
+            <a class="text-link" href="#interface">Explore JSON and SQL <span aria-hidden="true">↗</span></a>
+          </div>
+          <div class="ai-record ai-log">
+            <div class="ai-record-top"><span><i aria-hidden="true"></i> CHAT &amp; AGENT LOGS</span><span>EXAMPLE DATA</span></div>
+            <div class="ai-record-key"><span>agent_events</span><code>conversation-42 / run-108</code></div>
+            <ol class="ai-event-list" aria-label="Example events in application sequence order">
+              <li><span class="ai-event-icon" aria-hidden="true">U</span><div><div class="ai-event-heading"><b>User message</b><span>01</span></div><p>Find a quiet wireless keyboard under $100.</p></div></li>
+              <li><span class="ai-event-icon ai-event-tool" aria-hidden="true">↗</span><div><div class="ai-event-heading"><b>Tool result</b><span>02</span></div><p><code>search_catalog</code> <span class="ai-event-ok">ok</span></p><small>184 ms · 2 matching products</small></div></li>
+              <li><span class="ai-event-icon ai-event-assistant" aria-hidden="true">A</span><div><div class="ai-event-heading"><b>Assistant message</b><span>03</span></div><p>Two options match your preferences.</p></div></li>
+            </ol>
+            <div class="ai-record-read"><span class="small-label">INSPECT THE PUBLISHED EVENTS</span><pre tabindex="0"><code class="language-sql">SELECT value-&gt;&gt;'role' AS role,
+       value-&gt;&gt;'event_type' AS event_type,
+       value-&gt;&gt;'message' AS message,
+       value-&gt;&gt;'tool' AS tool,
+       value-&gt;&gt;'status' AS status
+FROM agent_events
+WHERE value-&gt;&gt;'run_id' = 'run-108'
+ORDER BY TRY_CAST(value-&gt;&gt;'sequence' AS BIGINT)
+LIMIT 200</code></pre></div>
+            <details class="ai-event-json"><summary>See a stored event <span aria-hidden="true">+</span></summary><pre tabindex="0"><code class="language-json">{
+  "event_id": "evt-108-02",
+  "conversation_id": "conversation-42",
+  "run_id": "run-108",
+  "sequence": 2,
+  "event_type": "tool_result",
+  "role": "tool",
+  "tool": "search_catalog",
+  "status": "ok",
+  "duration_ms": 184
+}</code></pre></details>
+            <p class="ai-record-note">Each event is a JSON document keyed by event ID. Your application supplies the sequence; SQL reads the published view.</p>
+          </div>
+        </div>
+
+
+        <div class="ai-more">
+          <div><span class="small-label">MORE WAYS TO BUILD</span><h3>The same API.<br>More possibilities.</h3></div>
+          <div class="ai-more-list">
+            <details><summary>Prompt versions <span aria-hidden="true">+</span></summary><p>Store prompt text and model settings under an explicit version ID. Your application selects the version to load for each request.</p><code>support-agent:v3</code></details>
+            <details><summary>Recommendations <span aria-hidden="true">+</span></summary><p>Save product or content recommendations computed by your pipeline. Fetch a prepared list by user or segment ID while background jobs refresh it.</p><code>recommendations:user-42</code></details>
+            <details><summary>Feature serving <span aria-hidden="true">+</span></summary><p>Keep pipeline-computed ML features under an entity-and-version key. Your application retrieves the prepared values when serving a prediction.</p><code>product-42:features-v2</code></details>
+            <details><summary>User feedback <span aria-hidden="true">+</span></summary><p>Record ratings, comments, and the response or model version they refer to. Use SQL to inspect the published feedback and compare results.</p><code>response-108:feedback-1</code></details>
+          </div>
+        </div>
+
+
+        <div class="ai-foundation"><div><span class="small-label">WHY ROCKBEE</span><h3>Your AI stack.<br>A shared data foundation.</h3></div><p><b>Flexible records.</b> Keep model-specific fields in JSON.</p><p><b>Durable object storage.</b> Keep saved data independent of model workers.</p><p><b>Independent readers.</b> Grow serving compute as more applications use the results.</p></div>
+        <div class="ai-behavior"><span>Your application runs the models and selects the context. Rockbee stores and serves the data.</span><a href="#contract-title">GET follows reader catch-up. SQL follows publication. <span aria-hidden="true">↗</span></a></div>
       </div>
     </section>
 
-    <section class="section wrap field-notes" aria-labelledby="notes-title">
-      <div class="section-intro">
-        <p class="eyebrow">A MEASURED PATH TO ADOPTION</p>
-        <h2 id="notes-title">Start small.<br>Measure what matters.</h2>
-        <p>Choose one read-heavy workload that can tolerate eventual reads. Evaluate it against your current system before expanding.</p>
-        <ol class="evaluation-steps">
-          <li><strong>Define the contract.</strong> Set acceptable reader lag, latency targets, and the application's handling of uncertain writes.</li>
-          <li><strong>Use representative traffic.</strong> Measure warm and cold reads, sustained writes, recovery, and behavior under peak load.</li>
-          <li><strong>Account for the whole system.</strong> Include reader memory, compute, object-store requests, and transfer costs. Adding readers does not guarantee linear gains.</li>
-        </ol>
-        <a class="text-link" href="https://github.com/umit/rockbee/blob/main/CONTRIBUTING.md">Inspect, reproduce, contribute <span aria-hidden="true">↗</span></a>
-      </div>
-      <div class="notes-content">
-        <div class="status-box"><span class="mono">CURRENT SCOPE</span><p>One writer per prefix. Independent eventual readers. Byte-oriented PUT, GET, and DELETE, with optional TTL.</p><p>Production AWS operation, TLS, automatic writer failover, sharding, and capacity limits remain outside the verified scope. LocalStack measurements do not establish production S3 performance.</p></div>
-        <h3>Ideas behind the project</h3>
-        <a class="reading-link" href="https://slatedb.io/blog/introducing-slatedb/"><span><small>SLATEDB</small>An Object-Native LSM for Online Systems</span><span aria-hidden="true">↗</span></a>
-        <a class="reading-link" href="https://materializedview.io/p/cloud-storage-triad-latency-cost-durability"><span><small>CHRIS RICCOMINI</small>The Cloud Storage Triad: Latency, Cost, Durability</span><span aria-hidden="true">↗</span></a>
-        <a class="reading-link" href="https://muratbuffalo.blogspot.com/2026/10/atlas-infinite-mongodbs-disaggregated.html"><span><small>MURAT DEMIRBAS</small>Atlas Infinite: MongoDB’s Disaggregated Architecture</span><span aria-hidden="true">↗</span></a>
-        <a class="text-link more-reading" href="https://github.com/umit/rockbee#inspiration-and-further-reading">More on Neon, turbopuffer, and WarpStream <span aria-hidden="true">↗</span></a>
-      </div>
-    </section>
+
+    <section class="contract-section shell" aria-labelledby="contract-title"><div class="contract-intro"><p class="eyebrow">05 / THE CONTRACT</p><h2 id="contract-title">Simple to use.<br>Clear about behavior.</h2></div><dl class="contract-list"><div><dt>Durable writes.</dt><dd>A successful mutation means SlateDB acknowledged durability. The client exposes uncertain outcomes and never automatically replays uncertain writes.</dd></div><div><dt>Eventual reads.</dt><dd>GET follows reader catch-up. SQL follows Parquet publication. A successful write can take time to appear on either read path.</dd></div><div><dt>Bounded SQL.</dt><dd>Reader query memory, concurrency, and timeouts are configurable. Results have explicit row and byte limits.</dd></div></dl></section>
+
+    <section class="get-started" id="try-it" aria-labelledby="start-title"><div class="shell start-layout"><div><p class="eyebrow">06 / BUILD SOMETHING</p><h2 id="start-title">Take the small API<br>for a real spin.</h2><p>Run a writer, a reader, and a gateway locally. Try byte lookups, write your first JSON document, then query the published table.</p><a class="button" href="https://github.com/umit/rockbee#try-it-locally">Open the setup guide <span aria-hidden="true">↗</span></a><p class="start-note">Rust via rustup + Docker Desktop.<br>See the guide for native DuckDB build setup on macOS.</p></div><div class="terminal"><div class="code-top"><span>TERMINAL / FRESH LOCAL SETUP</span><button type="button" class="copy" data-copy="start-code" aria-label="Copy local setup commands">Copy ↗</button></div><pre tabindex="0"><code class="language-bash" id="start-code">git clone https://github.com/umit/rockbee.git
+cd rockbee
+
+# Requires Docker and port 4566 available.
+docker compose up -d --wait
+make local</code></pre><p>The runner prints service addresses and uses a unique storage prefix. Keep it open; use its gateway address in your client.</p><a href="https://github.com/umit/rockbee#try-it-locally">Already running LocalStack? Follow the setup guide ↗</a></div></div></section>
+
+    <section class="questions shell" aria-labelledby="questions-title"><div><p class="eyebrow">A FEW GOOD QUESTIONS</p><h2 id="questions-title">Before you build.</h2></div><div class="faq-list"><details><summary>Is this a key-value store or a SQL database?<span aria-hidden="true">+</span></summary><p>The core stores opaque byte keys and values. JSON tables add document IDs and real DuckDB SELECT queries over a derived Parquet projection. SQL reads JSON tables; it does not interpret arbitrary byte values.</p></details><details><summary>What does scaling mean here?<span aria-hidden="true">+</span></summary><p>Reader processes share durable storage and can be provisioned separately from the writer. There is one writer per prefix. Operators configure readers; automatic scaling, sharding, and automatic writer failover are outside the current scope. Capacity depends on the workload, caches, gateway, network, and object store.</p></details><details><summary>Why object storage?<span aria-hidden="true">+</span></summary><p>Durable data lives independently of serving processes. Readers fetch shared files and cache their working sets locally, so each reader does not need a full independent durable replica. Cold reads, object requests, transfer costs, and cache warmup remain part of the design.</p></details><details><summary>What should I evaluate first?<span aria-hidden="true">+</span></summary><p>Start with a product catalog, application content, or saved model outputs where eventual reads fit the workflow. Run a writer and reader against your object store, then measure lookup latency, SQL publication lag, and recovery with your own data. The setup guide walks through the full path.</p></details></div></section>
+    <section class="closing shell"><p>Small surface.<br><span>Room to build.</span></p><a class="text-link" href="https://github.com/umit/rockbee">Explore Rockbee on GitHub <span aria-hidden="true">↗</span></a></section>
   </main>
-
-  <footer class="site-footer wrap"><div><a class="footer-wordmark" href="./">rockbee<span aria-hidden="true"> ⬡</span></a><p>Built on <a href="https://github.com/slatedb/slatedb">SlateDB</a>. Thanks to Chris Riccomini<br>and the SlateDB contributors.</p></div><div class="footer-links"><a href="https://github.com/umit/rockbee">Source code ↗</a><a href="https://github.com/umit/rockbee/issues">Issues ↗</a><a href="https://github.com/umit">By Ümit Ünal ↗</a><span>Built with Codex.</span></div></footer>
+  <footer class="footer shell"><a class="brand" href="./" aria-label="Rockbee home"><svg class="brand-logo" viewBox="120 145 1810 445" aria-hidden="true"><image href="assets/rockbee-logo-transparent.png" width="2007" height="784"/></svg></a><p>Built in Rust on <a href="https://github.com/slatedb/slatedb">SlateDB</a>. SQL by DuckDB.</p><div><a href="https://github.com/umit/rockbee#try-it-locally">Documentation ↗</a><a href="https://github.com/umit/rockbee">Source ↗</a></div></footer>
   <p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
 </body>
 </html>

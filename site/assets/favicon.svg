@@ -1,5 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#f8f7f3"/>
-  <path d="M32 5 56 19v27L32 60 8 46V19Z" fill="#f7b629"/>
-  <path d="M25 19v27h8V34c0-6 3-8 9-7v-8c-5-1-9 2-10 5v-5Z" fill="#20282b"/>
+  <g fill="#ffb51f" stroke="#f6f7f4" stroke-width="1.5" stroke-linejoin="round">
+    <path d="m32 2 13 8v16l-13 8-13-8V10Z"/>
+    <path d="m13 20 12 7v14l-12 7-12-7V27Z"/>
+    <path d="m51 20 12 7v14l-12 7-12-7V27Z"/>
+    <path d="m45 36 12 7v13l-12 7-12-7V43Z"/>
+    <path fill="#42535d" d="m18 36 12 7v13l-12 7-12-7V43Z"/>
+  </g>
+  <path d="M29 24q-1-7-7-10m13 10q1-7 7-10" fill="none" stroke="#20282e" stroke-width="3" stroke-linecap="round"/>
+  <defs><clipPath id="bee"><path d="M25 25q7-5 14 0l1 8c9 12-3 22-8 29-5-7-17-17-8-29Z"/></clipPath></defs>
+  <g clip-path="url(#bee)">
+    <path fill="#20282e" d="M19 20h27v44H19Z"/>
+    <path d="M19 34q13 4 27 0m-27 12q13 4 27 0m-24 9q10 4 21 0" fill="none" stroke="#ffb51f" stroke-width="4"/>
+  </g>
 </svg>

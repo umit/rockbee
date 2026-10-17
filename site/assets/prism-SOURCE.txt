@@ -1,0 +1,10 @@
+PrismJS 1.30.0
+Source: https://registry.npmjs.org/prismjs/-/prismjs-1.30.0.tgz
+Integrity: sha512-DEvV2ZF2r2/63V+tK8hQvrR2ZGn10srHbXviTlcv7Kpzw8jWiNTqbVgjO3IY8RxrrOUF8VPMQQFysYYYv0YZxw==
+Official release: https://github.com/PrismJS/prism/releases/tag/v1.30.0
+Components: core, rust, sql, json, bash, toml
+License: MIT; see prism-LICENSE.txt
+
+The components are unchanged minified upstream source, concatenated with a small
+manual-mode bootstrap. Rockbee uses Prism.tokenize and text-node rendering in
+syntax.js to preserve all source characters, including non-breaking spaces.

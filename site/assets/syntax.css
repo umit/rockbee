@@ -1,0 +1,12 @@
+/* Token colors only. Existing page typography, spacing, backgrounds and layout stay local. */
+.syntax-highlight[data-syntax-theme="light"]{--syntax-comment:#53606c;--syntax-keyword:#7035a4;--syntax-string:#195d34;--syntax-function:#155780;--syntax-number:#803b11;--syntax-punctuation:#3d4d59;--syntax-operator:#6b3e69;--syntax-property:#7d3529;--syntax-type:#64480e}
+.syntax-highlight[data-syntax-theme="dark"]{--syntax-comment:#b4bdc7;--syntax-keyword:#d9b6ff;--syntax-string:#a9dba4;--syntax-function:#9dceff;--syntax-number:#f8c88d;--syntax-punctuation:#d4dae2;--syntax-operator:#f3c0dc;--syntax-property:#e8bc9e;--syntax-type:#f5d58c}
+.syntax-highlight .token.comment,.syntax-highlight .token.prolog,.syntax-highlight .token.doctype,.syntax-highlight .token.cdata{color:var(--syntax-comment)}
+.syntax-highlight .token.keyword,.syntax-highlight .token.important,.syntax-highlight .token.atrule{color:var(--syntax-keyword)}
+.syntax-highlight .token.string,.syntax-highlight .token.char,.syntax-highlight .token.regex,.syntax-highlight .token.attr-value{color:var(--syntax-string)}
+.syntax-highlight .token.function,.syntax-highlight .token.function-name{color:var(--syntax-function)}
+.syntax-highlight .token.number,.syntax-highlight .token.boolean,.syntax-highlight .token.constant{color:var(--syntax-number)}
+.syntax-highlight .token.punctuation{color:var(--syntax-punctuation)}
+.syntax-highlight .token.operator,.syntax-highlight .token.entity,.syntax-highlight .token.url{color:var(--syntax-operator)}
+.syntax-highlight .token.property,.syntax-highlight .token.attr-name,.syntax-highlight .token.variable{color:var(--syntax-property)}
+.syntax-highlight .token.class-name,.syntax-highlight .token.builtin,.syntax-highlight .token.symbol{color:var(--syntax-type)}
