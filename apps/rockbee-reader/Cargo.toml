@@ -10,10 +10,14 @@ description = "Rockbee read-only storage node"
 workspace = true
 
 [dependencies]
-rockbee-node = { path = "../../crates/rockbee-node" }
+rockbee-runtime = { path = "../../crates/rockbee-runtime" }
+rockbee-protocol = { path = "../../crates/rockbee-protocol" }
+rockbee-query = { path = "../../crates/rockbee-query" }
+slatedb = { version = "=0.17.0", features = ["aws"] }
 tokio = { workspace = true }
 
 [dev-dependencies]
+rockbee-test-support = { path = "../../crates/rockbee-test-support" }
 rockbee-client = { path = "../../crates/rockbee-client" }
 serde_json = "1"
 tempfile = { version = "3", default-features = false }

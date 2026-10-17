@@ -28,13 +28,13 @@ impl Upstream {
         self.link.exchange(request, deadline).await
     }
 
-    pub(crate) fn start_get(
+    pub(crate) fn start_read(
         &self,
-        key: &[u8],
+        request: &Request,
         deadline: Instant,
     ) -> Result<JoinHandle<Result<Response>>> {
         let admission = self.link.try_admit()?;
-        let request = Request::Get { key: key.to_vec() };
+        let request = request.clone();
         let link = Arc::clone(&self.link);
         let mut owner = self.owner.subscribe();
         Ok(tokio::spawn(async move {
@@ -85,12 +85,27 @@ mod tests {
         });
 
         let upstream = Upstream::new(address, UpstreamConfig::new(1, 1)?);
-        let first = upstream.start_get(b"active", Instant::now() + Duration::from_secs(5))?;
-        let second = upstream.start_get(b"waiting", Instant::now() + Duration::from_secs(5))?;
+        let first = upstream.start_read(
+            &Request::Get {
+                key: b"active".to_vec(),
+            },
+            Instant::now() + Duration::from_secs(5),
+        )?;
+        let second = upstream.start_read(
+            &Request::Get {
+                key: b"waiting".to_vec(),
+            },
+            Instant::now() + Duration::from_secs(5),
+        )?;
         timeout(Duration::from_secs(1), first_ready).await??;
         assert!(
             upstream
-                .start_get(b"rejected", Instant::now() + Duration::from_secs(5))
+                .start_read(
+                    &Request::Get {
+                        key: b"rejected".to_vec()
+                    },
+                    Instant::now() + Duration::from_secs(5)
+                )
                 .is_err()
         );
         timeout(Duration::from_secs(1), no_second_ready).await??;

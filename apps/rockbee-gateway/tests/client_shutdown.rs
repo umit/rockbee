@@ -1,9 +1,9 @@
 //! Public client shutdown drains eager PUTs before disconnecting the gateway link.
 
-use rockbee_client::{Client, MutationOutcome};
+use rockbee_client::{MutationOutcome, RockBeeClient};
 use rockbee_gateway::Gateway;
-use rockbee_node::storage::Role;
-use rockbee_node::{Result, Server, Store};
+use rockbee_test_support::storage::Role;
+use rockbee_test_support::{Result, Server, Store};
 use slatedb::object_store::{ObjectStore, local::LocalFileSystem};
 use std::sync::Arc;
 use std::time::Duration;
@@ -121,7 +121,7 @@ async fn shutdown_drains_eager_puts_and_rejects_later_puts() -> Result<()> {
     let gateway_task = run_gateway(gateway, gateway_stopped);
 
     let body: Result<()> = async {
-        let client = Client::connect(&gateway_address).await?;
+        let client = RockBeeClient::connect(&gateway_address).await?;
         let mut handles = Vec::with_capacity(PUTS - 1);
         for (index, (key, value)) in expected.iter().enumerate() {
             let handle = client.put(key, value, None);

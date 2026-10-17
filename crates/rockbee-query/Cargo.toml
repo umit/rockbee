@@ -1,0 +1,21 @@
+[package]
+name = "rockbee-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Asynchronous Parquet exports and reader-side DuckDB SQL for Rockbee JSON tables"
+
+[lints]
+workspace = true
+
+[dependencies]
+rockbee-protocol = { path = "../rockbee-protocol" }
+slatedb = { version = "=0.17.0", features = ["aws"] }
+duckdb = { version = "=1.10506.1", features = ["json", "parquet"] }
+serde = { workspace = true }
+serde_json = "1"
+tokio = { workspace = true, features = ["fs"] }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+tempfile = { version = "3", default-features = false }

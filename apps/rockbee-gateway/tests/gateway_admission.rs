@@ -1,10 +1,10 @@
 //! Gateway-wide admission rejects overload before the writer-side relay sees a mutation.
-use rockbee_client::Client;
+use rockbee_client::RockBeeClient;
 use rockbee_gateway::Gateway;
-use rockbee_node::protocol::{Request, RequestEnvelope, Response, ResponseEnvelope};
-use rockbee_node::storage::Role;
-use rockbee_node::transport::{FrameReader, read_frame, write_frame};
-use rockbee_node::{Result, Server, Store};
+use rockbee_test_support::protocol::{Request, RequestEnvelope, Response, ResponseEnvelope};
+use rockbee_test_support::storage::Role;
+use rockbee_test_support::transport::{FrameReader, read_frame, write_frame};
+use rockbee_test_support::{Result, Server, Store};
 use slatedb::object_store::{ObjectStore, local::LocalFileSystem};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -183,7 +183,7 @@ async fn finish_relay(mut task: JoinHandle<Result<()>>) -> Result<()> {
     }
 }
 
-async fn direct_exact(client: &Client, key: &[u8], expected: Option<&[u8]>) -> Result<()> {
+async fn direct_exact(client: &RockBeeClient, key: &[u8], expected: Option<&[u8]>) -> Result<()> {
     let observed = timeout(OP_BOUND, client.get(key)).await??;
     if observed.as_deref() != expected {
         return Err(format!("direct writer state mismatch for {key:?}: {observed:?}").into());
@@ -222,7 +222,7 @@ async fn reopen_exact(
     }
 }
 
-/// A saturated gateway peer must not execute rejected mutations or poison another Client.
+/// A saturated gateway peer must not execute rejected mutations or poison another RockBeeClient.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn overload_peer_never_executes_rejected_mutations_or_poisons_another_client() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -277,13 +277,13 @@ async fn overload_peer_never_executes_rejected_mutations_or_poisons_another_clie
     let gateway_task = run_gateway(gateway, gateway_stopped);
 
     let body: Result<()> = async {
-        let writer_client = Client::connect(&writer_address).await?;
+        let writer_client = RockBeeClient::connect(&writer_address).await?;
         timeout(
             OP_BOUND,
             writer_client.put(&protected_key, &protected_value, None),
         )
         .await??;
-        let first = Client::connect(&gateway_address).await?;
+        let first = RockBeeClient::connect(&gateway_address).await?;
         let mut held = Vec::with_capacity(REQUESTS);
         for (key, value) in &expected {
             held.push(first.put(key, value, None));
@@ -292,7 +292,7 @@ async fn overload_peer_never_executes_rejected_mutations_or_poisons_another_clie
             .await
             .map_err(|_| "relay did not collect 128 real durable ACKs")??;
 
-        let second = Client::connect(&gateway_address).await?;
+        let second = RockBeeClient::connect(&gateway_address).await?;
         let put_error = timeout(
             FAST_REJECTION_BOUND,
             second.put(&rejected_key, b"must-not-forward", None),

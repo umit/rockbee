@@ -1,4 +1,8 @@
 mod lifecycle;
+mod table;
+
+pub use rockbee_protocol::table::QueryResult;
+pub use table::{Table, TablePutHandle};
 
 use lifecycle::{Lifecycle, Operation};
 use rockbee_protocol::transport::{Admission, Link};
@@ -18,11 +22,11 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_MAX_IN_FLIGHT: usize = 128;
 const DEFAULT_MAX_PENDING: usize = 128;
 
-/// Bounded connection and request settings for a [`Client`].
+/// Bounded connection and request settings for a [`RockBeeClient`].
 ///
 /// The default preserves Rockbee's existing five-second request deadline and
 /// 128 in-flight plus 128 pending requests on the client's single multiplexed TCP
-/// connection. Limits are per `Client` and shared by its clones.
+/// connection. Limits are per `RockBeeClient` and shared by its clones.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClientConfig {
     request_timeout: Duration,
@@ -81,27 +85,30 @@ impl Default for ClientConfig {
     }
 }
 
-/// Cloneable byte client backed by one bounded multiplexed TCP connection.
+/// Cloneable client for opaque bytes and JSON tables over one bounded TCP connection.
+///
+/// Use [`RockBeeClient::table`] to select a JSON table. Table and byte operations
+/// share admission limits, mutation outcomes, and graceful shutdown.
 ///
 /// PUT, GET and DELETE require nonempty keys; PUT also requires a nonempty value.
 /// Empty inputs are rejected locally before admission or sending a request.
 ///
 /// Applications that need synchronous calling own a Tokio runtime and call
 /// `Runtime::block_on` themselves.
-/// Keep the runtime used by [`Client::connect`] running while using this client
-/// or its clones, and until accepted PUT handles or [`Client::shutdown`] complete.
+/// Keep the runtime used by [`RockBeeClient::connect`] running while using this client
+/// or its clones, and until accepted PUT handles or [`RockBeeClient::shutdown`] complete.
 /// Its stored runtime handle does not keep the runtime alive. GET and DELETE may be polled on
 /// another runtime; their I/O, timers and reconnect tasks still use the connect
 /// runtime. A current-thread connect runtime must be actively driven by `block_on`.
 #[derive(Clone)]
-pub struct Client {
+pub struct RockBeeClient {
     link: Arc<Link>,
     runtime: tokio::runtime::Handle,
     lifecycle: Arc<Lifecycle>,
     config: ClientConfig,
 }
 
-/// Completion of a [`Client::put`] call: local rejection or an admitted PUT's result.
+/// Completion of a [`RockBeeClient::put`] call: local rejection or an admitted PUT's result.
 ///
 /// Validation or admission rejection produces a ready error without sending a request.
 /// For an admitted PUT, dropping this handle does not cancel the operation. The
@@ -112,7 +119,7 @@ pub struct PutHandle {
     receive: oneshot::Receiver<MutationResult>,
 }
 
-impl Client {
+impl RockBeeClient {
     /// Stop accepting calls on this client and all its clones, drain accepted
     /// operations, and close the TCP connection. Repeated/concurrent calls are safe.
     ///
@@ -140,10 +147,10 @@ impl Client {
 
     /// Connect using explicit bounded request settings.
     ///
-    /// [`Client::connect`] uses [`ClientConfig::default`].
+    /// [`RockBeeClient::connect`] uses [`ClientConfig::default`].
     pub async fn connect_with_config(address: &str, config: ClientConfig) -> Result<Self> {
         let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| "Client::connect requires a Tokio runtime")?;
+            .map_err(|_| "RockBeeClient::connect requires a Tokio runtime")?;
         let deadline = deadline(config.request_timeout)?;
         let link = Link::connect(
             address.to_owned(),
@@ -190,35 +197,39 @@ impl Client {
     }
 
     fn submit_put(&self, key: &[u8], value: &[u8], ttl_millis: Option<u64>) -> PutHandle {
+        let validation = match ttl_millis {
+            Some(ttl_millis) => validate_put_with_ttl_bytes(key, value, ttl_millis),
+            None => validate_request_bytes(key, Some(value)),
+        };
+        if let Err(error) = validation {
+            return rejected_put(error);
+        }
+        self.submit_put_request(match ttl_millis {
+            Some(ttl_millis) => Request::PutWithTtl {
+                key: key.to_vec(),
+                value: value.to_vec(),
+                ttl_millis,
+            },
+            None => Request::Put {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            },
+        })
+    }
+
+    // Callers validate and serialize before this shared eager admission path.
+    fn submit_put_request(&self, request: Request) -> PutHandle {
         let deadline = match deadline(self.config.request_timeout) {
             Ok(deadline) => deadline,
             Err(error) => return rejected_put(error),
         };
         let (respond, receive) = oneshot::channel();
-        let submission = (|| -> Result<(Request, Admission, Operation)> {
-            match ttl_millis {
-                Some(ttl_millis) => validate_put_with_ttl_bytes(key, value, ttl_millis)?,
-                None => validate_request_bytes(key, Some(value))?,
-            }
+        let submission = (|| -> Result<(Admission, Operation)> {
             let operation = self.lifecycle.start()?;
             let admission = self.link.try_admit()?;
-            Ok((
-                match ttl_millis {
-                    Some(ttl_millis) => Request::PutWithTtl {
-                        key: key.to_vec(),
-                        value: value.to_vec(),
-                        ttl_millis,
-                    },
-                    None => Request::Put {
-                        key: key.to_vec(),
-                        value: value.to_vec(),
-                    },
-                },
-                admission,
-                operation,
-            ))
+            Ok((admission, operation))
         })();
-        let (request, admission, operation) = match submission {
+        let (admission, operation) = match submission {
             Ok(submission) => submission,
             Err(error) => {
                 let _ = respond.send(Err(MutationError::new(MutationOutcome::NotSent, error)));

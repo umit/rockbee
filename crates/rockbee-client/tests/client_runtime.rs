@@ -1,4 +1,4 @@
-use rockbee_client::{Client, Result};
+use rockbee_client::{Result, RockBeeClient};
 use rockbee_protocol::transport::{FrameReader, read_frame, write_frame};
 use rockbee_protocol::{Request, RequestEnvelope, Response, ResponseEnvelope};
 use std::time::Duration;
@@ -43,7 +43,7 @@ impl Trigger {
         }
     }
 
-    async fn call(self, client: &Client) -> Result<()> {
+    async fn call(self, client: &RockBeeClient) -> Result<()> {
         let caller_id = Handle::current().id();
         match self {
             Self::Get => {
@@ -206,7 +206,7 @@ fn run_foreign_runtime_reconnect(trigger: Trigger) -> Result<()> {
     });
 
     let body = (|| -> Result<()> {
-        let client = runtime_a.block_on(Client::connect(&address))?;
+        let client = runtime_a.block_on(RockBeeClient::connect(&address))?;
         let initial_error = runtime_a.block_on(async {
             match timeout(IO_BOUND, client.get(INITIAL_KEY))
                 .await

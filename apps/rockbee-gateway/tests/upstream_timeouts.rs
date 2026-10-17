@@ -1,7 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 //! Regression coverage for timeout settings after they leave gateway TOML.
 
-use rockbee_client::{Client, ClientConfig, MutationOutcome};
+use rockbee_client::{ClientConfig, MutationOutcome, RockBeeClient};
 use rockbee_gateway::{Gateway, Result, config::Config};
 use rockbee_protocol::transport::{FrameReader, read_frame, write_frame};
 use rockbee_protocol::{RequestEnvelope, Response, ResponseEnvelope};
@@ -163,8 +163,8 @@ async fn start_gateway(config: Config) -> Result<(String, RunningGateway)> {
     ))
 }
 
-async fn client(address: &str) -> Result<Client> {
-    Client::connect_with_config(address, ClientConfig::new(TEST_BOUND, 8, 8)?).await
+async fn client(address: &str) -> Result<RockBeeClient> {
+    RockBeeClient::connect_with_config(address, ClientConfig::new(TEST_BOUND, 8, 8)?).await
 }
 
 #[tokio::test]

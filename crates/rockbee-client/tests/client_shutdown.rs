@@ -1,4 +1,4 @@
-use rockbee_client::{Client, MutationOutcome, Result};
+use rockbee_client::{MutationOutcome, Result, RockBeeClient};
 use rockbee_protocol::transport::{FrameReader, read_frame, write_frame};
 use rockbee_protocol::{Request, RequestEnvelope, Response, ResponseEnvelope};
 use tokio::net::TcpListener;
@@ -13,7 +13,7 @@ fn poll_once<F: Future + Unpin>(future: &mut F) -> std::task::Poll<F::Output> {
 #[tokio::test]
 async fn shutdown_drains_active_and_waiting_puts_without_polling_their_handles() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let client = Client::connect(&listener.local_addr()?.to_string()).await?;
+    let client = RockBeeClient::connect(&listener.local_addr()?.to_string()).await?;
     let clone = client.clone();
     let mut handles = Vec::new();
     // No peer can ACK yet: this fills active and waiting admissions.
@@ -75,7 +75,7 @@ async fn shutdown_drains_active_and_waiting_puts_without_polling_their_handles()
         assert!(seen.into_iter().all(|received| received));
         assert!(
             read_frame(&mut input).await?.is_none(),
-            "shutdown must close TCP even while Client clones live"
+            "shutdown must close TCP even while RockBeeClient clones live"
         );
         Result::<()>::Ok(())
     };
@@ -107,7 +107,7 @@ async fn shutdown_drains_active_and_waiting_puts_without_polling_their_handles()
 #[tokio::test]
 async fn cancelled_and_concurrent_shutdowns_preserve_started_get_and_delete() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let client = Client::connect(&listener.local_addr()?.to_string()).await?;
+    let client = RockBeeClient::connect(&listener.local_addr()?.to_string()).await?;
     let clone = client.clone();
     let mut get = Box::pin(client.get(b"read"));
     let mut delete = Box::pin(clone.delete(b"delete"));
@@ -179,7 +179,7 @@ async fn cancelled_and_concurrent_shutdowns_preserve_started_get_and_delete() ->
 #[tokio::test]
 async fn shutdown_finishes_after_connection_loss_without_replaying_put() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let client = Client::connect(&listener.local_addr()?.to_string()).await?;
+    let client = RockBeeClient::connect(&listener.local_addr()?.to_string()).await?;
     let put = client.put(b"uncertain", b"value", None);
     let peer = async {
         let (stream, _) = listener.accept().await?;
@@ -221,7 +221,7 @@ async fn shutdown_finishes_after_connection_loss_without_replaying_put() -> Resu
 #[tokio::test]
 async fn shutdown_of_idle_client_closes_socket_and_is_repeatable() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let client = Client::connect(&listener.local_addr()?.to_string()).await?;
+    let client = RockBeeClient::connect(&listener.local_addr()?.to_string()).await?;
     let clone = client.clone();
     timeout(BOUND, async {
         client.shutdown().await;
@@ -237,7 +237,7 @@ async fn shutdown_of_idle_client_closes_socket_and_is_repeatable() -> Result<()>
 #[tokio::test]
 async fn shutdown_preserves_request_deadline_when_peer_never_acknowledges() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let client = Client::connect(&listener.local_addr()?.to_string()).await?;
+    let client = RockBeeClient::connect(&listener.local_addr()?.to_string()).await?;
     let put = client.put(b"unacknowledged", b"value", None);
     let peer = async {
         let (stream, _) = listener.accept().await?;
@@ -285,10 +285,10 @@ fn put_result_survives_runtime_teardown_after_shutdown() -> Result<()> {
     Ok(())
 }
 
-async fn drain_put_on_current_runtime() -> Result<(Client, rockbee_client::PutHandle)> {
+async fn drain_put_on_current_runtime() -> Result<(RockBeeClient, rockbee_client::PutHandle)> {
     timeout(BOUND, async {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let client = Client::connect(&listener.local_addr()?.to_string()).await?;
+        let client = RockBeeClient::connect(&listener.local_addr()?.to_string()).await?;
         let handle = client.put(b"before-shutdown", b"value", None);
         let peer = async {
             let (stream, _) = listener.accept().await?;

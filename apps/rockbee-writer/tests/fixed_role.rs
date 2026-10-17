@@ -58,3 +58,27 @@ fn conflicting_toml_role_fails_even_when_cli_claims_the_expected_role() {
     assert!(!output.status.success());
     assert!(!temp.path().join("objects").exists());
 }
+
+#[test]
+fn writer_rejects_query_configuration_before_storage_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("must-not-open");
+    let config = temp.path().join("query.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "backend = 'file'\ndirectory = '{}'\n[query]\ntimeout_ms = 4000\n",
+            directory.display()
+        ),
+    )
+    .unwrap();
+    let output = binary()
+        .arg("--config")
+        .arg(&config)
+        .arg("--check-config")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("only supported by the reader role"));
+    assert!(!directory.exists());
+}

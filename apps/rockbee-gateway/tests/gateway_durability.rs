@@ -1,9 +1,9 @@
-use rockbee_client::Client;
+use rockbee_client::RockBeeClient;
 use rockbee_gateway::Gateway;
-use rockbee_node::protocol::{Request, RequestEnvelope, Response, ResponseEnvelope};
-use rockbee_node::storage::Role;
-use rockbee_node::transport::{FrameReader, read_frame, write_frame};
-use rockbee_node::{Result, Server, Store};
+use rockbee_test_support::protocol::{Request, RequestEnvelope, Response, ResponseEnvelope};
+use rockbee_test_support::storage::Role;
+use rockbee_test_support::transport::{FrameReader, read_frame, write_frame};
+use rockbee_test_support::{Result, Server, Store};
 use slatedb::object_store::{ObjectStore, local::LocalFileSystem};
 use std::sync::Arc;
 use std::time::Duration;
@@ -163,7 +163,7 @@ async fn fault_relay(listener: TcpListener, writer: String, drop_initial_ack: bo
     Ok(())
 }
 
-async fn wait_for(client: &Client, key: &[u8], expected: Option<&[u8]>) -> Result<()> {
+async fn wait_for(client: &RockBeeClient, key: &[u8], expected: Option<&[u8]>) -> Result<()> {
     let deadline = Instant::now() + CONVERGENCE_BOUND;
     let mut last = None;
     while Instant::now() < deadline {
@@ -225,7 +225,7 @@ async fn lost_gateway_writer_acks_are_unknown_without_replaying_durable_mutation
     let (gateway_address, gateway_stop, gateway_task) = start_gateway(gateway).await?;
 
     let body: Result<()> = async {
-        let client = Client::connect(&gateway_address).await?;
+        let client = RockBeeClient::connect(&gateway_address).await?;
         require_unknown(
             client.put(b"lost-key", b"original\0bytes", None).await,
             "initial PUT",

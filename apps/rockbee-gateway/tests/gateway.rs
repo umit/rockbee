@@ -1,14 +1,14 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use rockbee_gateway::{Gateway, config::Config, router::Router};
-use rockbee_node::Result;
-use rockbee_node::protocol::{
+use rockbee_protocol::ServiceRole;
+use rockbee_protocol::transport::Link;
+use rockbee_test_support::Result;
+use rockbee_test_support::protocol::{
     MAX_FRAME, MAX_KEY_LEN, Request, RequestEnvelope, Response, ResponseEnvelope, WireMessage,
     validate_request_bytes,
 };
-use rockbee_node::transport::{FrameReader, read_frame, write_frame};
-use rockbee_protocol::ServiceRole;
-use rockbee_protocol::transport::Link;
+use rockbee_test_support::transport::{FrameReader, read_frame, write_frame};
 use std::io::ErrorKind;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
@@ -474,9 +474,12 @@ async fn gateway_rejects_invalid_requests_before_contacting_any_backend() -> Res
                 key,
                 value,
                 ttl_millis,
-            } => rockbee_node::protocol::validate_put_with_ttl_bytes(key, value, *ttl_millis),
+            } => {
+                rockbee_test_support::protocol::validate_put_with_ttl_bytes(key, value, *ttl_millis)
+            }
             Request::Get { key } | Request::Delete { key } => validate_request_bytes(key, None),
             Request::Status => unreachable!("Status is handled before gateway routing"),
+            Request::Table(_) => unreachable!("table validation is tested separately"),
         }
         .err()
         .ok_or("invalid fixture unexpectedly passed protocol validation")?;

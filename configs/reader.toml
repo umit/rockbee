@@ -16,6 +16,13 @@ global_max_in_flight = 128
 read_timeout_ms = 30000
 write_timeout_ms = 5000
 
+[query]
+# DuckDB SELECT deadline, per-query engine memory, and simultaneous workers.
+# These limits do not alter SlateDB memory or promise a process RSS ceiling.
+timeout_ms = 4000
+memory_limit_mb = 256
+max_concurrent = 2
+
 [reader]
 # SlateDB checks durable manifest and WAL changes at this interval. Its pinned
 # default is 10 s. Lower values reduce eventual-read visibility delay but add

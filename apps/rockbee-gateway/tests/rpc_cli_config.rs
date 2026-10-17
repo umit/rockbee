@@ -1,11 +1,11 @@
 use rockbee_gateway::config::{Config as GatewayConfig, UpstreamConfig};
 use std::time::Duration;
 
-fn parse(args: &[&str]) -> rockbee_node::Result<Option<GatewayConfig>> {
+fn parse(args: &[&str]) -> rockbee_test_support::Result<Option<GatewayConfig>> {
     GatewayConfig::parse(args.iter().map(|arg| (*arg).to_owned()))
 }
 
-fn parse_owned(args: Vec<String>) -> rockbee_node::Result<Option<GatewayConfig>> {
+fn parse_owned(args: Vec<String>) -> rockbee_test_support::Result<Option<GatewayConfig>> {
     GatewayConfig::parse(args)
 }
 
@@ -259,7 +259,7 @@ fn gateway_check_config_keeps_validation_and_rejects_duplicate_switches() {
 }
 
 #[test]
-fn gateway_toml_supplies_a_complete_topology_and_limits() -> rockbee_node::Result<()> {
+fn gateway_toml_supplies_a_complete_topology_and_limits() -> rockbee_test_support::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("gateway.toml");
     std::fs::write(
@@ -314,7 +314,7 @@ write_timeout_ms = 3000
 }
 
 #[test]
-fn gateway_cli_overrides_toml_and_replaces_reader_list() -> rockbee_node::Result<()> {
+fn gateway_cli_overrides_toml_and_replaces_reader_list() -> rockbee_test_support::Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("gateway.toml");
     std::fs::write(
@@ -371,7 +371,7 @@ write_timeout_ms = 3000
 }
 
 #[test]
-fn gateway_rejects_unknown_toml_fields_at_every_level() -> rockbee_node::Result<()> {
+fn gateway_rejects_unknown_toml_fields_at_every_level() -> rockbee_test_support::Result<()> {
     let directory = tempfile::tempdir()?;
     for (name, contents) in [
         (
@@ -396,7 +396,8 @@ fn gateway_rejects_unknown_toml_fields_at_every_level() -> rockbee_node::Result<
 }
 
 #[test]
-fn gateway_rejects_unreadable_malformed_and_invalid_effective_toml() -> rockbee_node::Result<()> {
+fn gateway_rejects_unreadable_malformed_and_invalid_effective_toml()
+-> rockbee_test_support::Result<()> {
     let directory = tempfile::tempdir()?;
     let missing = directory.path().join("missing.toml");
     assert!(parse_owned(vec!["--config".to_owned(), missing.display().to_string()]).is_err());

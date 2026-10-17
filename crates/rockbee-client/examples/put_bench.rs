@@ -1,5 +1,5 @@
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use rockbee_client::Client;
+use rockbee_client::RockBeeClient;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::env;
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = parse_args(env::args().skip(1))?;
     let value = Arc::new(vec![b'x'; config.value_bytes]);
     let value_sha256 = hex_sha256(&value);
-    let client = Client::connect(&config.address).await?;
+    let client = RockBeeClient::connect(&config.address).await?;
     let started = Instant::now();
     let deadline = started + config.duration;
     let mut total = Stats::new(1);
@@ -100,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         serde_json::to_string(&json!({
             "benchmark": "rockbee-client-async-put",
             "client_put_api": "eager_handle",
-            "issue_timing": "Client::put is called before its handle enters FuturesUnordered; latency starts at that call",
+            "issue_timing": "RockBeeClient::put is called before its handle enters FuturesUnordered; latency starts at that call",
             "address": config.address,
             "prefix": config.prefix,
             "requested_window_seconds": config.duration.as_secs_f64(),
@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 fn issue_put(
-    client: Client,
+    client: RockBeeClient,
     key: String,
     value: Arc<Vec<u8>>,
 ) -> impl Future<Output = Completion> + Send + 'static {

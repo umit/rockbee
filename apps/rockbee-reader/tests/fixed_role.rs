@@ -89,11 +89,11 @@ fn conflicting_toml_role_fails_even_when_cli_claims_the_expected_role() {
 
 #[tokio::test]
 async fn invalid_reader_process_cannot_fence_live_writer_and_valid_reader_rejects_mutations()
--> rockbee_node::Result<()> {
-    use rockbee_client::Client;
-    use rockbee_node::backend::Backend;
-    use rockbee_node::storage::Role;
-    use rockbee_node::{Server, Store};
+-> rockbee_test_support::Result<()> {
+    use rockbee_client::RockBeeClient;
+    use rockbee_test_support::backend::Backend;
+    use rockbee_test_support::storage::Role;
+    use rockbee_test_support::{Server, Store};
     use std::process::Stdio;
     use std::sync::Arc;
     use std::time::Duration;
@@ -129,17 +129,20 @@ async fn invalid_reader_process_cannot_fence_live_writer_and_valid_reader_reject
             .stderr(Stdio::null())
             .spawn()?,
     );
-    let reject_deadline = Instant::now() + Duration::from_secs(2);
+    // This is a role-safety test, not a process-startup benchmark. A freshly
+    // linked macOS binary took 1.9s to start under parallel launches, leaving
+    // the former 2s bound vulnerable to loader and scheduler variation.
+    let reject_deadline = Instant::now() + Duration::from_secs(10);
     let rejection = loop {
         match rejected.try_wait()? {
             Some(status) => break status,
             None if Instant::now() < reject_deadline => sleep(Duration::from_millis(10)).await,
-            None => return Err("mismatched reader config did not exit before timeout".into()),
+            None => return Err("mismatched reader config did not exit within ten seconds".into()),
         }
     };
     assert!(!rejection.success());
 
-    let writer = Client::connect(&writer_address).await?;
+    let writer = RockBeeClient::connect(&writer_address).await?;
     writer.put(b"still-writer", b"durable", None).await?;
 
     let reader_address = {
@@ -164,7 +167,7 @@ async fn invalid_reader_process_cannot_fence_live_writer_and_valid_reader_reject
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let reader_client = loop {
-        match Client::connect(&reader_address).await {
+        match RockBeeClient::connect(&reader_address).await {
             Ok(client) => break client,
             Err(error) if Instant::now() < deadline => {
                 let _ = error;
@@ -210,4 +213,39 @@ async fn invalid_reader_process_cannot_fence_live_writer_and_valid_reader_reject
         .map_err(|_| "writer stop receiver dropped")?;
     writer_task.await??;
     Ok(())
+}
+
+#[test]
+fn query_check_config_resolves_limits_without_creating_storage() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("must-not-open");
+    let config = temp.path().join("query.toml");
+    let body = format!(
+        "backend = 'file'\ndirectory = '{}'\n[query]\ntimeout_ms = 1250\nmemory_limit_mb = 512\nmax_concurrent = 4\n",
+        directory.display()
+    );
+    std::fs::write(&config, &body).unwrap();
+    let output = binary()
+        .arg("--config")
+        .arg(&config)
+        .arg("--check-config")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let effective: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        effective["query"],
+        serde_json::json!({"timeout_ms":1250,"memory_limit_mb":512,"max_concurrent":4})
+    );
+    assert!(!directory.exists());
+    std::fs::write(&config, body.replace("timeout_ms = 1250", "timeout_ms = 0")).unwrap();
+    let rejected = binary()
+        .arg("--config")
+        .arg(&config)
+        .arg("--check-config")
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("query.timeout_ms"));
+    assert!(!directory.exists());
 }

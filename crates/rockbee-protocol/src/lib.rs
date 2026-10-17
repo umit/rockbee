@@ -1,12 +1,14 @@
-//! Shared Protobuf messages. Public Client and internal Upstream own separate APIs.
+//! Shared Protobuf messages. Public RockBeeClient and internal Upstream own separate APIs.
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::io::{self, Read, Write};
 
 mod mutation;
+pub mod table;
 pub mod transport;
 pub use mutation::{MutationError, MutationOutcome, MutationResult};
+use table::{QueryResult, TableRequest};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -23,6 +25,7 @@ pub mod wire {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Request {
+    Table(TableRequest),
     Put {
         key: Vec<u8>,
         value: Vec<u8>,
@@ -46,6 +49,7 @@ impl Request {
         matches!(
             self,
             Self::Put { .. } | Self::PutWithTtl { .. } | Self::Delete { .. }
+        ) || matches!(self, Self::Table(operation) if operation.is_mutation()
         )
     }
 }
@@ -74,6 +78,9 @@ pub struct StatusSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum Response {
+    Query {
+        result: QueryResult,
+    },
     Ok,
     Value {
         value: Option<Vec<u8>>,
@@ -92,6 +99,7 @@ pub enum Response {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpectedResponse {
+    Query,
     Mutation,
     Value,
     Status,
@@ -232,6 +240,18 @@ fn response_envelope_len(request_id: u64, response: &Response) -> Result<usize> 
             },
         )?,
         Response::Status { snapshot } => status_snapshot_len(snapshot)?,
+        Response::Query { result } => {
+            if result.rows.len() > table::MAX_QUERY_ROWS
+                || result.rows.iter().any(|row| !row.is_object())
+            {
+                return Err("query rows must be at most 1000 JSON objects".into());
+            }
+            let message = table::query_wire(result);
+            if message.rows_json.len() > table::MAX_QUERY_RESULT_BYTES {
+                return Err("query result exceeds supported bounds".into());
+            }
+            message.encoded_len()
+        }
     };
     envelope_len(request_id, 2, message_len)
 }
@@ -310,6 +330,24 @@ impl RequestEnvelope {
             Some(Get(v)) => Request::Get { key: v.key },
             Some(Delete(v)) => Request::Delete { key: v.key },
             Some(Status(_)) => Request::Status,
+            Some(TablePut(v)) => Request::Table(TableRequest::Put {
+                table: v.table,
+                id: v.id,
+                value: v.value,
+                ttl_millis: v.ttl_millis,
+            }),
+            Some(TableGet(v)) => Request::Table(TableRequest::Get {
+                table: v.table,
+                id: v.id,
+            }),
+            Some(TableDelete(v)) => Request::Table(TableRequest::Delete {
+                table: v.table,
+                id: v.id,
+            }),
+            Some(TableQuery(v)) => Request::Table(TableRequest::Query {
+                table: v.table,
+                sql: v.sql,
+            }),
             _ => return Err("expected a PUT, GET, DELETE or STATUS request".into()),
         };
         std::result::Result::Ok(Self {
@@ -325,6 +363,9 @@ impl ResponseEnvelope {
         let envelope = decode(frame)?;
         let response = match envelope.message {
             Some(Ok(_)) => Response::Ok,
+            Some(QueryResult(v)) => Response::Query {
+                result: table::query_from_wire(v)?,
+            },
             Some(Value(v)) => Response::Value { value: v.value },
             Some(Error(v)) => Response::Error {
                 message: v.message,
@@ -349,6 +390,9 @@ impl ResponseEnvelope {
     pub fn validate(self, expected: ExpectedResponse) -> Result<Response> {
         match self.response {
             response @ Response::Error { .. } => Ok(response),
+            response @ Response::Query { .. } if expected == ExpectedResponse::Query => {
+                Ok(response)
+            }
             response @ Response::Value { .. } if expected == ExpectedResponse::Value => {
                 Ok(response)
             }
@@ -369,6 +413,10 @@ pub trait WireMessage {
 impl WireMessage for Request {
     fn validate(&self) -> Result<()> {
         match self {
+            Request::Table(operation) => {
+                operation.validate()?;
+                validate_exact_len(self.to_wire().encoded_len())
+            }
             Request::Put { key, value } => {
                 validate_key_bytes(key)?;
                 validate_value_bytes(value)?;
@@ -401,6 +449,10 @@ impl WireMessage for Request {
 impl<R: Borrow<Request>> WireMessage for RequestEnvelope<R> {
     fn validate(&self) -> Result<()> {
         match self.request.borrow() {
+            Request::Table(operation) => {
+                operation.validate()?;
+                validate_exact_len(self.to_wire().encoded_len())
+            }
             Request::Put { key, value } => {
                 validate_key_bytes(key)?;
                 validate_value_bytes(value)?;
@@ -430,6 +482,7 @@ impl<R: Borrow<Request>> WireMessage for RequestEnvelope<R> {
     fn to_wire(&self) -> wire::Envelope {
         use wire::envelope::Message::*;
         let message = match self.request.borrow() {
+            Request::Table(operation) => operation.message(),
             Request::Put { key, value } => Put(wire::Put {
                 key: key.clone(),
                 value: value.clone(),
@@ -476,6 +529,7 @@ fn response_wire(request_id: u64, response: &Response) -> wire::Envelope {
     use wire::envelope::Message::*;
     let message = match response {
         Response::Ok => Ok(wire::Ok {}),
+        Response::Query { result } => QueryResult(table::query_wire(result)),
         Response::Value { value } => Value(wire::Value {
             value: value.clone(),
         }),

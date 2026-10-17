@@ -1,4 +1,4 @@
 #[tokio::main]
-async fn main() -> rockbee_node::Result<()> {
-    rockbee_node::reader::run(std::env::args().skip(1)).await
+async fn main() -> rockbee_runtime::Result<()> {
+    rockbee_reader::run(std::env::args().skip(1)).await
 }

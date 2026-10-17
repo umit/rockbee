@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::panic))]
 
-use rockbee_client::{Client, MutationOutcome, Result};
+use rockbee_client::{MutationOutcome, Result, RockBeeClient};
 use rockbee_protocol::transport::{FrameReader, read_frame, write_frame};
 use rockbee_protocol::{Request, RequestEnvelope, Response, ResponseEnvelope};
 use std::future::Future;
@@ -18,16 +18,19 @@ fn ready_error<T, E>(future: impl Future<Output = std::result::Result<T, E>>) ->
     }
 }
 
-async fn connected() -> Result<(Client, TcpStream)> {
+async fn connected() -> Result<(RockBeeClient, TcpStream)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let client = Client::connect(&listener.local_addr()?.to_string()).await?;
+    let client = RockBeeClient::connect(&listener.local_addr()?.to_string()).await?;
     let (stream, _) = listener.accept().await?;
     Ok((client, stream))
 }
 
 // Removing any preflight must fail the local-ready assertion or this real socket
 // transcript: only valid binary CRUD may arrive, with no extra request before EOF.
-async fn assert_binary_crud_after_rejection(client: Client, stream: TcpStream) -> Result<()> {
+async fn assert_binary_crud_after_rejection(
+    client: RockBeeClient,
+    stream: TcpStream,
+) -> Result<()> {
     let peer = async move {
         let (input, mut output) = stream.into_split();
         let mut input = FrameReader::new(input);

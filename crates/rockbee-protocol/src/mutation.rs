@@ -11,7 +11,7 @@ type Cause = Box<dyn Error + Send + Sync>;
 #[serde(rename_all = "snake_case")]
 pub enum MutationOutcome {
     /// This hop did not enqueue the request to its socket writer.
-    /// At the public Client boundary, the request never left that client.
+    /// At the public RockBeeClient boundary, the request never left that client.
     NotSent,
     /// A responding server confirms it did not apply this request.
     Rejected,

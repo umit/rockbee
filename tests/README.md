@@ -6,7 +6,7 @@ Client examples' unit tests, and does not need Docker or LocalStack.
 
 `make verify` adds `cargo fmt --check` and Clippy to that suite.
 
-`crates/rockbee-node/tests/localstack.rs` is the opt-in real-process integration
+`crates/rockbee-test-support/tests/localstack.rs` is the opt-in real-process integration
 test. Run `make test-local ENDPOINT=http://127.0.0.1:4566 BUCKET=rockbee-test`.
 The target builds release binaries, starts an isolated writer, reader, and
 gateway with its own S3 prefix, and stops only those child processes. It requires

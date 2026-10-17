@@ -37,7 +37,7 @@ async fn client_reconnects_after_idle_timeout_releases_its_slot() -> Result<()> 
             Ok(())
         },
     ));
-    let client = rockbee_client::Client::connect(&address.to_string()).await?;
+    let client = rockbee_client::RockBeeClient::connect(&address.to_string()).await?;
     assert_eq!(client.get(b"before-idle").await?, None);
     tokio::time::sleep(Duration::from_millis(160)).await;
     // With a one-socket cap, another accepted GET proves that the first

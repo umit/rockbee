@@ -6,6 +6,18 @@ The gateway accepts the public byte protocol and forwards `PUT`/`DELETE` to the
 configured writer and `GET` to the configured readers. It owns routing, bounded
 admission and upstream links. It has no key/value cache or SlateDB instance.
 
+JSON tables use the same routes and limits: table PUT/DELETE go once to the writer;
+table GET and SQL queries use readers in round-robin order, failing over on
+errors or timeouts within the total request budget. A missing GET is a successful
+read and does not trigger a freshness retry. Query results carry an
+`exported_wal_file_id` watermark for the reader's published Parquet export;
+durable write acknowledgement does not guarantee immediate reader visibility.
+
+```text
+RockBeeClient -> Gateway -- table PUT/DELETE --> Writer -> SlateDB WAL
+                  -- table GET/SQL ----> Readers <- exported Parquet
+```
+
 From the repository root, after starting writer and reader:
 
 ```sh
@@ -39,7 +51,7 @@ inside `[upstream]` and `[rpc]`, are rejected.
 `[upstream].request_timeout_ms` sets the total routing deadline after request
 validation, covering upstream queueing, connection, and reply time. It defaults
 to 5000 ms. `reader_attempt_timeout_ms` defaults to 1000 ms and limits each
-intermediate reader attempt for a `GET`; it may be larger than the total budget,
+intermediate reader attempt for a raw/table GET or SQL query; it may be larger than the total budget,
 but is capped by the time remaining. The last (or only) reader receives the
 entire remaining total deadline. Both values must be positive milliseconds.
 Their command-line forms are `--upstream-request-timeout-ms` and
@@ -52,5 +64,5 @@ eventually consistent. A timeout does not guarantee cancellation of a mutation
 already sent to the writer; mutations are never automatically retried.
 
 Read [how it works](../../README.md#how-it-works) and
-[the Client contract](../../crates/rockbee-client/README.md). Package integration tests
+[the RockBeeClient contract](../../crates/rockbee-client/README.md). Package integration tests
 live in `tests/`; the server transport is shared through `rockbee-rpc`.

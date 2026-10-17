@@ -1,11 +1,11 @@
-//! Bounded correctness soak for one public Client through an uncached gateway.
+//! Bounded correctness soak for one public RockBeeClient through an uncached gateway.
 //!
 //! It exercises one writer and the gateway's configured reader(s). Reader
 //! observations are intentionally eventual: a mutable key may show an earlier
 //! acknowledged version or `None`, but never another lane's bytes, a future
 //! version, or malformed bytes. This is not a throughput benchmark.
 
-use rockbee_client::Client;
+use rockbee_client::RockBeeClient;
 use serde_json::json;
 use std::env;
 use std::error::Error;
@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run(config: Config) -> Result<()> {
-    let client = Client::connect(&config.address).await?;
+    let client = RockBeeClient::connect(&config.address).await?;
     let counts = Arc::new(Counts::default());
     let sentinel_key = key(&config.namespace, b"sentinel", 0);
     let sentinel_value = payload(&config.namespace, u32::MAX, 0)?;
@@ -211,7 +211,7 @@ async fn run(config: Config) -> Result<()> {
         "{}",
         serde_json::to_string(&json!({
             "audit": "rockbee-client-mixed-soak",
-            "scope": "one retained public Client and clones through an uncached gateway; reader observations are eventual",
+            "scope": "one retained public RockBeeClient and clones through an uncached gateway; reader observations are eventual",
             "namespace": config.namespace,
             "address": config.address,
             "lanes": config.lanes,
@@ -255,7 +255,7 @@ async fn run(config: Config) -> Result<()> {
 }
 
 async fn seed(
-    client: &Client,
+    client: &RockBeeClient,
     sentinel_key: &[u8],
     sentinel_value: &[u8],
     mutable_keys: &[Vec<u8>],
@@ -274,7 +274,7 @@ async fn seed(
 }
 
 async fn lane_loop(
-    client: Client,
+    client: RockBeeClient,
     work: LaneWork,
     deadline: Instant,
     counts: Arc<Counts>,
@@ -322,7 +322,7 @@ async fn lane_loop(
 }
 
 async fn wait_initial(
-    client: &Client,
+    client: &RockBeeClient,
     sentinel_key: &[u8],
     sentinel_value: &[u8],
     mutable_keys: &[Vec<u8>],
@@ -366,7 +366,7 @@ fn initial_sentinel_ready(observed: Option<&[u8]>, expected: &[u8]) -> Result<bo
 }
 
 async fn wait_final(
-    client: &Client,
+    client: &RockBeeClient,
     sentinel_key: &[u8],
     sentinel_value: &[u8],
     mutable_keys: &[Vec<u8>],
@@ -408,7 +408,7 @@ async fn wait_or_timeout(phase: &str, deadline: Instant) -> Result<()> {
 }
 
 async fn convergence_get(
-    client: &Client,
+    client: &RockBeeClient,
     key: &[u8],
     deadline: Instant,
     phase: &str,
@@ -430,21 +430,21 @@ fn convergence_budget(deadline: Instant, now: Instant) -> Result<Duration> {
     Ok(deadline.duration_since(now).min(OPERATION_BOUND))
 }
 
-async fn put(client: &Client, key: &[u8], value: &[u8]) -> Result<()> {
+async fn put(client: &RockBeeClient, key: &[u8], value: &[u8]) -> Result<()> {
     tokio::time::timeout(OPERATION_BOUND, client.put(key, value, None))
         .await
         .map_err(|_| "PUT exceeded six seconds")??;
     Ok(())
 }
 
-async fn delete(client: &Client, key: &[u8]) -> Result<()> {
+async fn delete(client: &RockBeeClient, key: &[u8]) -> Result<()> {
     tokio::time::timeout(OPERATION_BOUND, client.delete(key))
         .await
         .map_err(|_| "DELETE exceeded six seconds")??;
     Ok(())
 }
 
-async fn get(client: &Client, key: &[u8]) -> Result<Option<Vec<u8>>> {
+async fn get(client: &RockBeeClient, key: &[u8]) -> Result<Option<Vec<u8>>> {
     tokio::time::timeout(OPERATION_BOUND, client.get(key))
         .await
         .map_err(|_| "GET exceeded six seconds")?

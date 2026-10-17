@@ -2,11 +2,11 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use rockbee_gateway::router::Router;
-use rockbee_node::Result;
-use rockbee_node::protocol::{
+use rockbee_test_support::Result;
+use rockbee_test_support::protocol::{
     MAX_FRAME, Request, RequestEnvelope, Response, ResponseEnvelope, encode_frame,
 };
-use rockbee_node::transport::{FrameReader, read_frame, write_frame};
+use rockbee_test_support::transport::{FrameReader, read_frame, write_frame};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -442,10 +442,10 @@ async fn active_and_pending_bounds_cancel_queued_calls_without_sending_bytes() -
 // This exercises durable Store writes and read-only readers behind actual TCP envelopes.
 #[tokio::test(flavor = "multi_thread")]
 async fn unchanged_client_gateway_file_storage_crud_and_durable_reopen() -> Result<()> {
-    use rockbee_client::Client;
+    use rockbee_client::RockBeeClient;
     use rockbee_gateway::Gateway;
-    use rockbee_node::storage::Role;
-    use rockbee_node::{Server, Store};
+    use rockbee_test_support::storage::Role;
+    use rockbee_test_support::{Server, Store};
     use slatedb::object_store::{ObjectStore, local::LocalFileSystem};
     let directory = tempfile::tempdir()?;
     let objects: Arc<dyn ObjectStore> =
@@ -478,7 +478,7 @@ async fn unchanged_client_gateway_file_storage_crud_and_durable_reopen() -> Resu
         stopped_g.await?;
         Ok(())
     }));
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     assert_eq!(
         client.get(b"seed").await?.as_deref(),
         Some(b"ready".as_slice())
@@ -499,9 +499,9 @@ async fn unchanged_client_gateway_file_storage_crud_and_durable_reopen() -> Resu
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let read_only = Client::connect(&reader_address).await?;
+    let read_only = RockBeeClient::connect(&reader_address).await?;
     assert!(read_only.put(b"durable", b"corrupt", None).await.is_err());
-    let read_only = Client::connect(&reader_address).await?;
+    let read_only = RockBeeClient::connect(&reader_address).await?;
     assert!(read_only.delete(b"durable").await.is_err());
     stop_g.send(()).unwrap();
     g.await??;

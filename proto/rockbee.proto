@@ -14,10 +14,15 @@ message Envelope {
     Delete delete = 12;
     PutWithTtl put_with_ttl = 13;
     Status status = 14;
+    TablePut table_put = 15;
+    TableKey table_get = 16;
+    TableKey table_delete = 17;
+    TableQuery table_query = 18;
     Ok ok = 20;
     Value value = 21;
     Error error = 22;
     StatusSnapshot status_snapshot = 23;
+    QueryResult query_result = 24;
   }
 }
 message Put { bytes key = 1; bytes value = 2; }
@@ -25,6 +30,10 @@ message PutWithTtl { bytes key = 1; bytes value = 2; uint64 ttl_millis = 3; }
 message Get { bytes key = 1; }
 message Delete { bytes key = 1; }
 message Status {}
+message TablePut { string table = 1; string id = 2; bytes value = 3; uint64 ttl_millis = 4; }
+message TableKey { string table = 1; string id = 2; }
+message TableQuery { string table = 1; string sql = 2; }
+message QueryResult { bytes rows_json = 1; uint64 exported_wal_file_id = 2; }
 message Ok {}
 // Absent means missing; present empty bytes means a stored empty value.
 message Value { optional bytes value = 1; }

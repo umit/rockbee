@@ -1,5 +1,5 @@
 //! Opt-in acceptance of the built foreground operator and real role binaries.
-use rockbee_client::{Client, Result};
+use rockbee_client::{Result, RockBeeClient};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -108,7 +108,7 @@ impl Drop for Operator {
     }
 }
 
-async fn eventually(client: &Client, key: &[u8], expected: Option<&[u8]>) -> Result<()> {
+async fn eventually(client: &RockBeeClient, key: &[u8], expected: Option<&[u8]>) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if client.get(key).await?.as_deref() == expected {
@@ -224,7 +224,7 @@ async fn local_operator_starts_probes_byte_crud_and_stops_owned_roles() -> Resul
             assert_eq!(row["snapshot"]["requests_completed_total"], 0);
         }
 
-        let client = Client::connect(gateway).await?;
+        let client = RockBeeClient::connect(gateway).await?;
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let key = format!("operator-{suffix}\0").into_bytes();
         let value = [0_u8, 255, 128, 0, 42];

@@ -1,4 +1,4 @@
-use rockbee_client::{Client, Result};
+use rockbee_client::{Result, RockBeeClient};
 use rockbee_protocol::transport::{FrameReader, read_frame, write_frame};
 use rockbee_protocol::{
     MAX_KEY_LEN, MutationError, MutationOutcome, RequestEnvelope, Response, ResponseEnvelope,
@@ -18,7 +18,7 @@ fn outcome(error: Box<dyn std::error::Error + Send + Sync>) -> MutationOutcome {
 #[tokio::test]
 async fn local_preflight_is_not_sent_and_the_connection_remains_usable() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let client = Client::connect(&listener.local_addr()?.to_string()).await?;
+    let client = RockBeeClient::connect(&listener.local_addr()?.to_string()).await?;
     let peer = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (input, mut output) = stream.into_split();
@@ -68,7 +68,7 @@ async fn local_preflight_is_not_sent_and_the_connection_remains_usable() -> Resu
 #[tokio::test]
 async fn explicit_rejection_and_legacy_error_are_distinct_without_message_parsing() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let client = Client::connect(&listener.local_addr()?.to_string()).await?;
+    let client = RockBeeClient::connect(&listener.local_addr()?.to_string()).await?;
     let peer = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (input, mut output) = stream.into_split();
@@ -118,7 +118,7 @@ async fn explicit_rejection_and_legacy_error_are_distinct_without_message_parsin
 #[tokio::test]
 async fn delivery_without_a_reply_is_unknown_and_is_not_replayed() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let client = Client::connect(&listener.local_addr()?.to_string()).await?;
+    let client = RockBeeClient::connect(&listener.local_addr()?.to_string()).await?;
     let peer = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut input = FrameReader::new(stream);

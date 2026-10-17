@@ -5,7 +5,7 @@ to read durable PUT and DELETE changes from object storage. It prints one JSON
 event per line. Rockbee readers work without this tool.
 
 ```text
-Client -> Gateway -> Writer -> SlateDB -> S3 WAL
+RockBeeClient -> Gateway -> Writer -> SlateDB -> S3 WAL
                                            |
                                            v
                                   rockbee-cdc -> JSON

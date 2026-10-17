@@ -108,6 +108,7 @@ async fn oversized_handler_responses_fall_back_and_keep_legacy_and_mux_connectio
                         | Request::PutWithTtl { key, .. }
                         | Request::Delete { key } => key,
                         Request::Status => panic!("Status is handled before the handler"),
+                        Request::Table(_) => panic!("unexpected table request"),
                     };
                     *calls
                         .lock()

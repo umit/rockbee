@@ -11,7 +11,7 @@ workspace = true
 
 [dependencies]
 rockbee-protocol = { path = "../../crates/rockbee-protocol" }
-rockbee-node = { path = "../../crates/rockbee-node" }
+rockbee-runtime = { path = "../../crates/rockbee-runtime" }
 slatedb = { version = "=0.17.0", features = ["aws"] }
 tokio = { workspace = true }
 serde = { workspace = true }

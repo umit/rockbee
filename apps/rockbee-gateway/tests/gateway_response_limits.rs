@@ -2,9 +2,11 @@
 //! public correlation ID overflow the gateway's egress frame or retire the peer.
 
 use rockbee_gateway::Gateway;
-use rockbee_node::Result;
-use rockbee_node::protocol::{MAX_FRAME, Request, RequestEnvelope, Response, ResponseEnvelope};
-use rockbee_node::transport::{FrameReader, read_frame, write_frame};
+use rockbee_test_support::Result;
+use rockbee_test_support::protocol::{
+    MAX_FRAME, Request, RequestEnvelope, Response, ResponseEnvelope,
+};
+use rockbee_test_support::transport::{FrameReader, read_frame, write_frame};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -150,7 +152,7 @@ async fn scripted_reader(listener: TcpListener) -> Result<()> {
             message: "E".repeat(MAX_FRAME - 17),
         },
     };
-    if rockbee_node::protocol::encode_frame(&oversized)?.len() != MAX_FRAME {
+    if rockbee_test_support::protocol::encode_frame(&oversized)?.len() != MAX_FRAME {
         return Err("oversized backend Error fixture did not exactly fill MAX_FRAME".into());
     }
     timeout(BOUND, write_frame(&mut output, &oversized))

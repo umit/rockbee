@@ -112,7 +112,7 @@ test:
 	$(CARGO) test --workspace --doc --locked
 
 test-local: build
-	ROCKBEE_BIN_DIR="$(abspath $(CARGO_TARGET_DIR))/release" ROCKBEE_S3_ENDPOINT="$(ENDPOINT)" ROCKBEE_S3_BUCKET="$(BUCKET)" $(CARGO) test --locked -p rockbee-node --test localstack -- --ignored --nocapture
+	ROCKBEE_BIN_DIR="$(abspath $(CARGO_TARGET_DIR))/release" ROCKBEE_S3_ENDPOINT="$(ENDPOINT)" ROCKBEE_S3_BUCKET="$(BUCKET)" $(CARGO) test --locked -p rockbee-test-support --test localstack -- --ignored --nocapture
 	ROCKBEE_BIN_DIR="$(abspath $(CARGO_TARGET_DIR))/release" ROCKBEE_S3_ENDPOINT="$(ENDPOINT)" ROCKBEE_S3_BUCKET="$(BUCKET)" $(CARGO) test --locked -p rockbee-cli --test localstack -- --ignored --nocapture
 
 verify: fmt-check

@@ -189,6 +189,8 @@ fn mutation_failure(
 fn expected_response(request: &Request) -> ExpectedResponse {
     match request {
         Request::Get { .. } => ExpectedResponse::Value,
+        Request::Table(crate::table::TableRequest::Get { .. }) => ExpectedResponse::Value,
+        Request::Table(crate::table::TableRequest::Query { .. }) => ExpectedResponse::Query,
         Request::Status => ExpectedResponse::Status,
         request if request.is_mutation() => ExpectedResponse::Mutation,
         _ => unreachable!("all request variants are classified"),

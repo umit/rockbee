@@ -1,22 +1,18 @@
-# Writer
+# Rockbee writer
 
-Package and binary: `rockbee-writer`.
+`rockbee-writer` owns the writable SlateDB engine in [its library](src/lib.rs).
+The executable fixes its role to writer; conflicting CLI or TOML roles fail before
+binding or opening storage. Configuration, RPC serving, and process lifecycle
+helpers live in `rockbee-runtime`.
 
-This entrypoint always opens the writer role. A conflicting role in CLI arguments
-or TOML is an error. The [main function](src/main.rs) calls `rockbee_node::writer::run`. Writer
-SlateDB operations live in [the writer module](../../crates/rockbee-node/src/writer);
-configuration, startup and TCP handling are shared in the
-[rockbee-node library](../../crates/rockbee-node/README.md).
-
-This binary is its own process, listening on port `7101` by default. Its RAM
-is separate from the gateway and reader processes.
-
-From the repository root:
-
-```sh
-make writer
+```text
+RockBeeClient -> Gateway -> Writer -> SlateDB WAL -> object store
+                              |
+                              +-> table exporter -> Parquet + manifest
 ```
 
-One active writer owns a database prefix. Successful mutations wait for SlateDB
-durability. See [writer configuration](../../configs/writer.toml) and
-[mutation completion semantics](../../crates/rockbee-client/README.md).
+Opaque bytes use physical key prefix zero. JSON table documents use a disjoint
+prefix and publish a persistent table catalogue marker in the same durable batch.
+PUT and DELETE acknowledge SlateDB durability. The background Parquet exporter is
+independent of mutation acknowledgements. Shutdown stops export before closing
+SlateDB and still attempts database close if exporter shutdown fails.

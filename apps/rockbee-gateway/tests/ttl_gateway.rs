@@ -1,14 +1,14 @@
-use rockbee_client::Client;
+use rockbee_client::RockBeeClient;
 use rockbee_gateway::Gateway;
-use rockbee_node::storage::Role;
-use rockbee_node::{Result, Server, Store};
+use rockbee_test_support::storage::Role;
+use rockbee_test_support::{Result, Server, Store};
 use slatedb::object_store::{ObjectStore, local::LocalFileSystem};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
 
-async fn visible(client: &Client, key: &[u8], expected: Option<&[u8]>) -> Result<()> {
+async fn visible(client: &RockBeeClient, key: &[u8], expected: Option<&[u8]>) -> Result<()> {
     timeout(Duration::from_secs(30), async {
         loop {
             if client.get(key).await?.as_deref() == expected {
@@ -35,7 +35,7 @@ async fn stop(
     }
 }
 
-// Catches TTL being lost by Client encoding, gateway forwarding, storage writes,
+// Catches TTL being lost by RockBeeClient encoding, gateway forwarding, storage writes,
 // or a warm reader returning an expired newest version/its older predecessor.
 #[tokio::test]
 async fn ttl_flows_through_gateway_and_expires_without_another_write() -> Result<()> {
@@ -67,7 +67,7 @@ async fn ttl_flows_through_gateway_and_expires_without_another_write() -> Result
     }));
 
     let body: Result<()> = async {
-        let client = Client::connect(&gateway_addr).await?;
+        let client = RockBeeClient::connect(&gateway_addr).await?;
         visible(&client, b"key\xff", Some(b"older-forever")).await?;
         let started = Instant::now();
         client

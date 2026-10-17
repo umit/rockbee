@@ -413,6 +413,7 @@ async fn slow_response_writer_duplicate_and_overload_retire_bounded_work() -> Re
                                 Ok(Response::Ok)
                             }
                             Request::Delete { .. } => panic!("unexpected delete"),
+                            Request::Table(_) => panic!("unexpected table request"),
                             Request::Status => panic!("Status is handled before the handler"),
                         }
                     }

@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>A simple key-value service with durable object storage and independent readers.</strong><br>
-  Built in Rust on <a href="https://github.com/slatedb/slatedb">SlateDB</a>.
+  Built in Rust on <a href="https://github.com/slatedb/slatedb">SlateDB</a>, with JSON tables and DuckDB SQL.
 </p>
 
 <p align="center">
@@ -14,31 +14,53 @@
 <p align="center">
   <a href="https://umitunal.net/rockbee/">Website</a> ·
   <a href="#try-it-locally">Quick start</a> ·
+  <a href="#json-tables-and-sql">JSON + SQL</a> ·
   <a href="#how-it-works">Architecture</a> ·
   <a href="#where-it-fits">Use cases</a> ·
   <a href="crates/rockbee-client/README.md">Rust client</a> ·
   <a href="tools/rockbee-cdc/README.md">CDC</a>
 </p>
 
-Rockbee puts a small byte-oriented API in front of [SlateDB](https://github.com/slatedb/slatedb):
-`PUT`, `GET`, and `DELETE`, with optional TTL. One writer persists changes to
-S3-compatible storage; independent readers serve lookups from their own SlateDB
-state and RAM caches. A gateway gives applications one endpoint for both paths.
+Rockbee gives applications one Rust client for opaque byte values, schema-free
+JSON documents, and real DuckDB SQL. Store a document, retrieve it by ID, or query
+selected fields and aggregates. Documents in the same table can have different
+fields; IDs can be generated UUIDs or supplied by the caller.
 
-The design separates serving compute from the durable storage layer. Readers
-follow the same stored data without copying updates between reader peers. That
-makes Rockbee a project to explore for read-heavy, asynchronously updated views
-where applications can tolerate older results while readers catch up.
+One writer acknowledges durable mutations. Independent readers serve point
+lookups through SlateDB and SQL over Parquet published in the background. The
+gateway provides one endpoint. Reader GET and SQL visibility are eventual.
 
-**Status:** active local pilot, validated with Docker LocalStack. Production AWS
-operation, TLS, automatic writer failover, and capacity limits remain outside the
-verified scope.
+| Surface | What it provides |
+| --- | --- |
+| Byte keys and values | `put`, `get`, `delete`, optional TTL, and existing opaque-byte semantics |
+| JSON tables | Named tables, mixed document fields, generated or caller IDs, replacement, deletion, and TTL |
+| DuckDB SQL | Table-scoped SELECTs, JSON expressions, CTEs, projections, and aggregates over published Parquet |
+| Independent roles | Separate gateway, writer, and reader processes; reader resources can be provisioned separately |
+| Explicit write outcomes | Eager completion handles, durable success, bounded requests, and no replay of uncertain mutations |
+
+**Status:** active local pilot. The raw KV path has LocalStack coverage; table
+CRUD and Parquet SQL have local object-store end-to-end tests. Production AWS
+operation, TLS, automatic writer failover, and production capacity are not
+verified. The [query guide](crates/rockbee-query/README.md) documents resource
+bounds and current retention behavior.
 
 ## How it works
 
-![How Rockbee works: PUT and DELETE go to one SlateDB writer; GET goes to independent SlateDB readers with separate RAM caches and shared object storage.](.github/assets/rockbee-how-it-works.png)
+```text
+RockBeeClient -> Gateway -> Writer -> SlateDB WAL -> durable ACK
+                       -> Readers -> SlateDB (byte / document GET)
+Writer background -> DuckDB -> Parquet + manifests -> Readers / DuckDB (SQL)
+                               shared object storage
+```
+
+<details>
+<summary>SlateDB point-read path illustrated</summary>
+
+![Point-read path: PUT and DELETE go to one SlateDB writer; GET goes to independent SlateDB readers with separate RAM caches and shared object storage.](.github/assets/rockbee-how-it-works.png)
 
 [SVG diagram](.github/assets/rockbee-how-it-works.svg)
+
+</details>
 
 1. **Write once through the writer.** The gateway sends `PUT` and `DELETE` to the
    single writer for a storage prefix. SlateDB persists the write-ahead log (WAL)
@@ -47,17 +69,24 @@ verified scope.
    across configured readers with round-robin selection. Each reader follows
    manifests and WAL updates and fetches sorted table files (SSTs) through
    SlateDB, with its own RAM cache. The gateway has no key/value cache.
-3. **Allow time for visibility.** A durable write may not yet be visible through
+3. **Query a published projection.** The writer exports JSON table snapshots and
+   durable changes into immutable Parquet segments, then publishes their manifest.
+   Reader-side DuckDB queries those files. A query does not rescan all SlateDB
+   documents. The latest version per ID is resolved before expiry, deletion, or
+   the user's SQL predicates are applied.
+4. **Allow time for visibility.** A durable write may not yet be visible through
    a reader. A `GET` can return an older value or `None` until that reader catches
-   up. Readers do not replicate directly to each other.
+   up. SQL also waits for Parquet publication. Readers do not replicate directly
+   to each other.
 
-Keys and values are opaque bytes: Rockbee does not interpret JSON, documents, or
-application schemas. All KV operations require a nonempty key; `PUT` also requires a
+The raw KV API keeps keys and values opaque. An optional JSON table API adds
+schema-free documents and eventual DuckDB SQL over exported Parquet. All raw KV
+operations require a nonempty key; `PUT` also requires a
 nonempty value. Binary zero bytes are valid. TTL is optional and expiration is
 checked on reads. There is one writer per prefix, with no sharding or automatic
 writer failover.
 
-The Rust Client uses bounded, multiplexed TCP requests. `put()` immediately
+The Rust RockBeeClient uses bounded, multiplexed TCP requests. `put()` immediately
 returns a completion handle; awaiting it observes local rejection or the durable
 write result. Mutation errors distinguish `NotSent`, `Rejected`, and `Unknown`.
 An uncertain write may have succeeded, so it is never automatically replayed.
@@ -65,8 +94,8 @@ See the [SDK guide](crates/rockbee-client/README.md) for completion and error se
 
 ## Where it fits
 
-Rockbee is designed for applications that need a simple key-value API and want
-to scale read capacity independently of durable storage. E-commerce catalogs,
+Rockbee is designed for applications that need key lookups, flexible JSON, or
+eventual SQL over the same table data. E-commerce catalogs,
 recommendation services, content platforms, and applications serving reporting
 or AI/ML results can use it to retrieve data by key.
 
@@ -96,10 +125,11 @@ individual service processes.
 | Batch results and reporting snapshots | `report:daily:2026-10-09` → one completed aggregate or report payload | Producers publish completed results for repeated point reads; readers do not need to observe every intermediate update. |
 | DWH dashboard results | `sales:store:42:2026-10-10` → a precomputed daily sales summary | A warehouse job calculates the summary and exports it; a dashboard fetches the prepared result by key and accepts a refresh delay. |
 
-For reporting and AI/ML workloads, the upstream pipeline handles queries,
-aggregation, training, or inference and publishes the resulting values. Rockbee
-serves those values by key. Exporting and refreshing them is the application's
-responsibility. Versioned keys can identify a specific report run or model output.
+For opaque byte workloads, an upstream pipeline handles aggregation, training,
+or inference and publishes resulting values for point lookups. JSON table
+workloads can also filter and aggregate their documents with DuckDB SQL. Model
+execution, refresh scheduling, and choosing acceptable data freshness remain
+application responsibilities. Versioned keys can identify a report or model run.
 
 The key names above are application conventions. Values may contain JSON,
 Protobuf, compressed content, or another encoding chosen by the caller; Rockbee
@@ -130,20 +160,31 @@ intended workload. LocalStack results do not establish production S3 capacity.
   keys, such as inventory reservations, balances, and payment state.
 - Distributed locks, strict rate-limit enforcement, or immediate security and
   permission revocation.
-- SQL, secondary indexes, document queries, range scans, or vector search through
-  the public API. Rockbee currently exposes point `PUT`, `GET`, and `DELETE`.
+- Secondary indexes, transactional SQL, vector search, or SQL results that must
+  immediately reflect a write. JSON table SQL reads an eventual Parquet export.
 - Automatic writer failover or distributed write sharding, which this version
   does not implement.
 
-For an existing database migration, first identify a workload that uses only
-these point operations and accepts eventual reads. Validate its failure handling,
+For an existing database migration, first identify a workload that fits these
+point operations or table SELECTs and accepts eventual reads. Validate its failure handling,
 freshness, and capacity independently; matching a key-value API does not make
 Rockbee a drop-in replacement for every database feature.
 
 ## Try it locally
 
-You need Rust installed through rustup and Docker Desktop. The repository pins
-the development toolchain in `rust-toolchain.toml`. Use an existing compatible
+You need Rust through rustup, a C++ toolchain for bundled DuckDB, and Docker
+Desktop for LocalStack. The repository pins Rust 1.98.1 with Clippy and Rustfmt
+in `rust-toolchain.toml`. On macOS, install Apple's Command Line Tools; if Clang
+cannot find standard C++ headers, set this in the terminal running Cargo:
+
+```sh
+export CXXFLAGS="-isystem $(xcrun --sdk macosx --show-sdk-path)/usr/include/c++/v1"
+```
+
+For RustRover, see [IDE setup](#rustrover-setup). Rockbee's integration is Rust;
+the bundled DuckDB engine is C++.
+
+Use an existing compatible
 LocalStack instance with bucket `rockbee-test`. Only if no compatible instance is
 running **and port 4566 is free**, start the repository's Compose service:
 
@@ -266,7 +307,7 @@ terminal banner remain. Invalid filters fail before the service binds or opens
 storage. `--help` and `--check-config` do not initialize logging. The local
 launcher saves each child service's stderr in its printed log directory.
 Successful GET/PUT/DELETE requests are not logged individually, and Rockbee's
-diagnostics do not record their keys or values. The public Rust Client emits
+diagnostics do not record their keys or values. The public Rust RockBeeClient emits
 diagnostic events but leaves subscriber setup to the application that uses it.
 
 The reader's `[reader].poll_interval_ms` setting in
@@ -307,19 +348,19 @@ bucket, prefix, and cursor path with explicit CLI flags, including
 `./rockbee-cdc.cursor.json`; using a different cursor starts a separate export
 instead of resuming the previous one.
 
-## Use the Rust Client
+## Use the Rust RockBeeClient
 
 The SDK is the `rockbee-client` workspace crate. Connect to the gateway address
 printed by `make local` and keep the Tokio runtime running until pending handles
 complete:
 
 ```rust
-use rockbee_client::{Client, Result};
+use rockbee_client::{RockBeeClient, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let gateway = std::env::var("GATEWAY_ADDR")?;
-    let client = Client::connect(&gateway).await?;
+    let client = RockBeeClient::connect(&gateway).await?;
 
     // Starts immediately; None means no TTL.
     let completion = client.put(b"product:42", b"enriched-description", None);
@@ -338,22 +379,90 @@ The CLI package is `rockbee-cli`; its `rockbee-client` binary is distinct from t
 SDK crate. See the [SDK guide](crates/rockbee-client/README.md) for input rules,
 completion handles, client limits and timeouts, and compatibility details.
 
+## JSON tables and SQL
+
+```rust,ignore
+let products = client.table("products");
+let write = products.put(&serde_json::json!({
+    "name": "Keyboard", "price": 2500, "brand": "Logitech"
+}));
+println!("submitted {}", write.id()); // UUID available immediately.
+let id = write.await?; // Durable writer acknowledgement.
+
+// Another document in the same table can carry different fields.
+products.put_key("book-42", &serde_json::json!({
+    "title": "Database Internals", "author": "Alex"
+}), None).await?;
+
+let document = products.get(&id).await?; // May be older or missing.
+
+// Run after the export catches up; see the polling example linked below.
+let result = products.query(
+    "SELECT id, value->>'name' AS name, \
+            TRY_CAST(value->>'price' AS BIGINT) AS price \
+     FROM products WHERE TRY_CAST(value->>'price' AS BIGINT) < 3000 \
+     ORDER BY price LIMIT 50"
+).await?;
+println!("{:?}", result.rows); // JSON objects containing selected SQL columns.
+```
+
+Documents may have different fields. `put` generates a UUID; `put_key` accepts
+caller IDs. Table PUT/DELETE keep the same durable acknowledgement and uncertain
+outcome semantics as raw KV. SQL runs on readers over immutable Parquet files
+published asynchronously by the writer. Queries may lag acknowledged mutations;
+`result.exported_wal_file_id` identifies the consumed WAL watermark. It is a
+diagnostic value, not a mutation receipt or an immediate consistency guarantee.
+An initial query can report warming or see an empty reader view. The
+[runnable table example](crates/rockbee-client/examples/tables.rs) polls reads
+until its own documents become query-visible.
+
+```text
+RockBeeClient -> Gateway -> Writer -> SlateDB/object storage
+                        -> Reader -> SlateDB (GET)
+Writer -> DuckDB -> Parquet/object storage -> Reader/DuckDB (SQL)
+```
+
+The gateway has no data cache. The reader's disposable Parquet file cache is
+separate from SlateDB's internal point-read caches. SQL exposes `(id VARCHAR,
+value JSON)` and accepts a single DuckDB SELECT, including CTEs and aggregates.
+Results are bounded to 1,000 rows and 512 KiB JSON; use projections and LIMIT.
+Overflow returns an error rather than silently truncating a result. The default
+reader query budget is four seconds, 256 MB DuckDB memory, and two concurrent
+queries. Configure it in the reader TOML:
+
+```toml
+[query]
+timeout_ms = 4000
+memory_limit_mb = 256
+max_concurrent = 2
+```
+
+Increase client and gateway deadlines too when increasing the reader deadline.
+Run `rockbee-reader --config configs/reader.toml --check-config` to inspect the
+resolved settings. Superseded Parquet segments and manifest history are retained;
+automatic garbage collection is future work.
+
+See the [SDK guide](crates/rockbee-client/README.md) and
+[query module](crates/rockbee-query/README.md) for bounds and export behavior.
+
 ## Find your way around
 
 | Directory | Responsibility |
 | --- | --- |
 | `apps/rockbee-gateway` | Gateway routing and executable |
-| `apps/rockbee-writer`, `apps/rockbee-reader` | Separate role executables |
-| `crates/rockbee-node` | SlateDB writer/reader implementations, shared storage facade, startup, and TCP handling |
+| `apps/rockbee-writer`, `apps/rockbee-reader` | Actual writer/reader implementations and fixed-role executables |
+| `crates/rockbee-runtime` | Shared configuration, memory budgets and generic RPC lifecycle |
+| `crates/rockbee-query` | Background DuckDB/Parquet export and reader SQL execution |
+| `crates/rockbee-test-support` | Test-only facade and shared storage regressions |
 | `crates/rockbee-client` | Public async Rust SDK |
 | `crates/rockbee-protocol`, `crates/rockbee-rpc` | Wire format, transport, and bounded RPC |
 | `tools/rockbee-cli`, `tools/rockbee-cdc` | Local operator/CLI tools and optional WAL export |
 | `site` | Static project website, published to GitHub Pages from `main` |
 
-Writer and reader link the same `rockbee-node` library but run as separate
-processes with separate memory. Start at the
-[node source guide](crates/rockbee-node/README.md); the legacy `rockbee-server`
-binary remains available for compatibility.
+Writer, reader and gateway are separate packages and processes. The
+[writer](apps/rockbee-writer/README.md) owns mutations and export lifecycle; the
+[reader](apps/rockbee-reader/README.md) owns GET and SQL. Shared startup and RPC
+code lives in [runtime](crates/rockbee-runtime/README.md).
 
 [Reader configuration](configs/reader.toml) ·
 [Writer configuration](configs/writer.toml) ·
@@ -364,6 +473,24 @@ Design notes, research, and verification receipts are maintained separately in
 the local sibling directory `../rockbee-docs/`. They are not required to build or
 run this repository. The architecture image is included here so this README
 also renders in a standalone checkout.
+
+## RustRover setup
+
+- Open the root `Cargo.toml` as one workspace. Let rustup select the pinned
+  toolchain; **Settings > Rust** should show version **1.98.1**.
+- Keep macro expansion enabled and the toolchain's standard library sources
+  available for navigation and type inference.
+- Use **Rust > External Linters > Clippy**, with `--locked` as an additional
+  argument. Keep the channel at its default so it follows `rust-toolchain.toml`.
+- Keep **Rust > Rustfmt > Use Rustfmt instead of the built-in formatter** enabled
+  so formatting follows this repository's Rustfmt configuration.
+- If the macOS header issue occurs, add `CXXFLAGS` under **Rust > Environment
+  variables**. Its value is `-isystem /actual/sdk/path/usr/include/c++/v1`, using
+  the output of `xcrun --sdk macosx --show-sdk-path`. IDE environment fields do not
+  execute `$(...)`. Refresh Cargo projects after changing it. No compiler wrapper
+  is required.
+
+IDE settings remain local; command-line builds need their own environment.
 
 ## Develop and verify
 

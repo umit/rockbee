@@ -1,6 +1,6 @@
-use rockbee_client::{Client, ClientConfig, MutationOutcome, Result};
+use rockbee_client::{ClientConfig, MutationOutcome, Result, RockBeeClient};
 use rockbee_gateway::Gateway;
-use rockbee_node::{Server, Store, storage::Role};
+use rockbee_test_support::{Server, Store, storage::Role};
 use slatedb::object_store::memory::InMemory;
 use std::sync::Arc;
 use tokio::{
@@ -26,7 +26,7 @@ async fn received_but_unforwarded_gateway_mutation_is_rejected_not_client_not_se
         vec![reader.local_addr()?.to_string()],
     )
     .await?;
-    let client = Client::connect_with_config(
+    let client = RockBeeClient::connect_with_config(
         &gateway.local_addr()?.to_string(),
         ClientConfig::new(Duration::from_secs(10), 1, 1)?,
     )
@@ -67,7 +67,7 @@ async fn read_only_storage_rejection_survives_both_rpc_hops_without_changing_dat
         vec![spare.local_addr()?.to_string()],
     )
     .await?;
-    let client = Client::connect(&gateway.local_addr()?.to_string()).await?;
+    let client = RockBeeClient::connect(&gateway.local_addr()?.to_string()).await?;
     let (stop_reader, stopped_reader) = oneshot::channel();
     let reader_task = tokio::spawn(reader.run_until(async {
         stopped_reader.await?;
@@ -86,7 +86,7 @@ async fn read_only_storage_rejection_survives_both_rpc_hops_without_changing_dat
             assert_eq!(result.unwrap_err().outcome(), MutationOutcome::Rejected);
         }
         assert_eq!(writer_store.get(b"key").await?, Some(b"original".to_vec()));
-        let direct_reader = Client::connect(&reader_address).await?;
+        let direct_reader = RockBeeClient::connect(&reader_address).await?;
         assert_eq!(direct_reader.get(b"key").await?, Some(b"original".to_vec()));
         Ok(())
     }

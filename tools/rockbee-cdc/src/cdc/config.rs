@@ -1,5 +1,5 @@
-use rockbee_node::backend::Backend;
 use rockbee_protocol::Result;
+use rockbee_runtime::backend::Backend;
 use std::path::PathBuf;
 
 pub const CDC_USAGE: &str = "Usage: rockbee-cdc [--backend localstack|file|s3] [--prefix PREFIX] \\

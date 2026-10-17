@@ -1,10 +1,10 @@
-//! Low-load ACK-to-reader visibility measurement through the public Client.
+//! Low-load ACK-to-reader visibility measurement through the public RockBeeClient.
 //! Run against already-started binaries; this program does not manage services.
 //!
 //! With no `--reader` arguments, GETs go through the gateway and measure its
 //! round-robin reader path. Supplying `--reader HOST:PORT` measures every named
 //! reader directly after each mutation is acknowledged by the gateway.
-use rockbee_client::{Client, Result};
+use rockbee_client::{Result, RockBeeClient};
 use serde_json::{Value, json};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinSet;
@@ -41,7 +41,7 @@ impl TargetKind {
 struct Target {
     endpoint: String,
     kind: TargetKind,
-    client: Client,
+    client: RockBeeClient,
 }
 
 fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Config> {
@@ -76,7 +76,7 @@ fn parse_config(args: impl IntoIterator<Item = String>) -> Result<Config> {
     })
 }
 
-async fn connect_targets(config: &Config, gateway: &Client) -> (Vec<Target>, Vec<Value>) {
+async fn connect_targets(config: &Config, gateway: &RockBeeClient) -> (Vec<Target>, Vec<Value>) {
     if config.readers.is_empty() {
         return (
             vec![Target {
@@ -91,7 +91,7 @@ async fn connect_targets(config: &Config, gateway: &Client) -> (Vec<Target>, Vec
     let mut targets = Vec::with_capacity(config.readers.len());
     let mut failures = Vec::new();
     for endpoint in &config.readers {
-        match Client::connect(endpoint).await {
+        match RockBeeClient::connect(endpoint).await {
             Ok(client) => targets.push(Target {
                 endpoint: endpoint.clone(),
                 kind: TargetKind::Reader,
@@ -192,7 +192,7 @@ fn observations_succeeded(observations: &[Value]) -> bool {
 }
 
 async fn mutate_and_observe(
-    gateway: &Client,
+    gateway: &RockBeeClient,
     targets: &[Target],
     key: &[u8],
     value: &[u8],
@@ -268,7 +268,7 @@ fn complete_operations(
 }
 
 async fn wave(
-    gateway: &Client,
+    gateway: &RockBeeClient,
     targets: &[Target],
     fixtures: &[(Vec<u8>, Vec<u8>)],
 ) -> (Vec<Value>, Vec<Value>) {
@@ -334,7 +334,7 @@ async fn wave(
     (puts, deletes)
 }
 
-async fn shutdown_all(gateway: &Client, targets: &[Target]) {
+async fn shutdown_all(gateway: &RockBeeClient, targets: &[Target]) {
     let mut pending = JoinSet::new();
     pending.spawn({
         let gateway = gateway.clone();
@@ -342,7 +342,7 @@ async fn shutdown_all(gateway: &Client, targets: &[Target]) {
     });
     for target in targets {
         // In gateway-only mode this intentionally calls shutdown on a clone of
-        // the same Client. Client::shutdown is idempotent and concurrent-safe.
+        // the same RockBeeClient. RockBeeClient::shutdown is idempotent and concurrent-safe.
         let client = target.client.clone();
         pending.spawn(async move { client.shutdown().await });
     }
@@ -358,7 +358,7 @@ fn all_operations_succeeded(puts: &[Value], deletes: &[Value]) -> bool {
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = parse_config(std::env::args().skip(1).collect::<Vec<_>>())?;
-    let gateway = Client::connect(&config.gateway).await?;
+    let gateway = RockBeeClient::connect(&config.gateway).await?;
     let started = Instant::now();
     let (targets, setup_failures) = connect_targets(&config, &gateway).await;
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -541,7 +541,7 @@ mod tests {
             Arc::clone(&observed),
         )
         .await?;
-        let client = Client::connect(&address).await?;
+        let client = RockBeeClient::connect(&address).await?;
         let target = Target {
             endpoint: address,
             kind: TargetKind::Reader,
@@ -588,8 +588,8 @@ mod tests {
             Arc::clone(&delete_before_put_observed),
         )
         .await?;
-        let gateway = Client::connect(&gateway_address).await?;
-        let reader = Client::connect(&reader_address).await?;
+        let gateway = RockBeeClient::connect(&gateway_address).await?;
+        let reader = RockBeeClient::connect(&reader_address).await?;
         let targets = vec![Target {
             endpoint: reader_address,
             kind: TargetKind::Reader,

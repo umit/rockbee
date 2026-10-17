@@ -1,4 +1,4 @@
-use rockbee_client::{Client, MutationOutcome, Result};
+use rockbee_client::{MutationOutcome, Result, RockBeeClient};
 use rockbee_protocol::transport::{FrameReader, read_frame, write_frame};
 use rockbee_protocol::{MAX_FRAME, Request, RequestEnvelope, Response, ResponseEnvelope};
 use std::net::TcpListener as StdTcpListener;
@@ -9,7 +9,7 @@ use tokio::time::{Duration, timeout};
 fn client_connect_without_a_tokio_runtime_returns_an_error() {
     let waker = std::task::Waker::noop();
     let mut context = std::task::Context::from_waker(waker);
-    let mut connect = Box::pin(Client::connect("127.0.0.1:1"));
+    let mut connect = Box::pin(RockBeeClient::connect("127.0.0.1:1"));
 
     match Future::poll(connect.as_mut(), &mut context) {
         std::task::Poll::Ready(Err(error)) => {
@@ -48,7 +48,7 @@ async fn client_routes_out_of_order_binary_get_replies_to_the_right_call() -> Re
         }
     });
 
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     let (left, right) = tokio::join!(client.get(&[0, 255]), client.get(&[128, 0]));
     assert_eq!(left?, Some(vec![0, 255]));
     assert_eq!(right?, Some(vec![128, 0]));
@@ -82,7 +82,8 @@ async fn client_sends_binary_crud_requests() -> Result<()> {
                 Request::Put { .. } | Request::PutWithTtl { .. } | Request::Delete { .. } => {
                     Response::Ok
                 }
-                Request::Status => panic!("public CRUD Client must not send Status"),
+                Request::Status => panic!("public CRUD RockBeeClient must not send Status"),
+                Request::Table(_) => panic!("byte CRUD fixture must not receive table requests"),
             };
             write_frame(
                 &mut output,
@@ -96,7 +97,7 @@ async fn client_sends_binary_crud_requests() -> Result<()> {
         }
     });
 
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     client.put(&[0], &[255], None).await?;
     assert_eq!(client.get(&[0]).await?, Some(vec![255]));
     client.delete(&[0]).await?;
@@ -138,7 +139,7 @@ async fn put_rounds_positive_sub_milliseconds_up_and_zero_stays_an_ordinary_put(
         }
     });
 
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     client
         .put(b"rounded", b"value", Some(Duration::from_nanos(1)))
         .await?;
@@ -163,7 +164,7 @@ async fn put_rejects_ttl_outside_signed_millisecond_range_without_sending() -> R
             Ok(Err(error)) => panic!("unexpected wire error: {error}"),
         }
     });
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     let error = client
         .put(
             b"key",
@@ -229,7 +230,7 @@ async fn put_submits_before_its_handle_is_polled_and_routes_out_of_order_acks() 
         }
     });
 
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     let first = client.put(b"first", b"value", Some(Duration::from_millis(2)));
     let second = client.put(b"second", b"value", None);
     timeout(Duration::from_millis(250), received_notice)
@@ -269,7 +270,7 @@ async fn dropping_a_put_handle_does_not_cancel_other_in_flight_puts() -> Result<
         .unwrap();
     });
 
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     let dropped = client.put(b"dropped", b"value", None);
     let retained = client.put(b"retained", b"value", None);
     drop(dropped);
@@ -299,7 +300,7 @@ async fn dropping_the_last_client_does_not_cancel_an_accepted_put() -> Result<()
         .unwrap();
     });
 
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     let accepted = client.put(b"accepted", b"value", None);
     drop(client);
     accepted.await?;
@@ -346,7 +347,7 @@ async fn dropped_put_handle_times_out_without_replaying_the_mutation() -> Result
         .unwrap();
     });
 
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     drop(client.put(b"lost", b"value", None));
     tokio::time::sleep(Duration::from_millis(5_100)).await;
     assert_eq!(client.get(b"after-timeout").await?, None);
@@ -359,7 +360,7 @@ fn runtime_shutdown_reports_unknown_after_put_reaches_peer() -> Result<()> {
     let listener = StdTcpListener::bind("127.0.0.1:0")?;
     let address = listener.local_addr()?.to_string();
     let runtime = tokio::runtime::Runtime::new()?;
-    let client = runtime.block_on(Client::connect(&address))?;
+    let client = runtime.block_on(RockBeeClient::connect(&address))?;
     let pending = client.put(b"pending", b"value", None);
     let (mut peer, _) = listener.accept()?;
     peer.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -384,7 +385,7 @@ fn runtime_shutdown_reports_unknown_after_put_reaches_peer() -> Result<()> {
 async fn eager_puts_share_the_link_budget_and_recover_without_sending_rejections() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?.to_string();
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     let clone = client.clone();
     let mut handles = Vec::new();
     // No peer is polled yet, so no ACK can release an admission while filling
@@ -520,7 +521,7 @@ async fn client_does_not_replay_a_failed_mutation() -> Result<()> {
         );
     });
 
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     assert!(client.put(b"key", b"value", None).await.is_err());
     server.await.unwrap();
     Ok(())
@@ -555,7 +556,7 @@ async fn oversized_request_does_not_send_and_the_client_remains_usable() -> Resu
         .unwrap();
     });
 
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     assert!(
         client
             .put(b"k", &vec![0; MAX_FRAME - 4], None)
@@ -657,7 +658,7 @@ async fn malformed_response_keeps_get_error_distinct_from_uncertain_put_and_reco
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     });
 
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     let put = client.put(b"pending-put", b"value", None);
     let (get, put) = tokio::join!(client.get(b"pending-get"), put);
     let body: Result<()> = async {

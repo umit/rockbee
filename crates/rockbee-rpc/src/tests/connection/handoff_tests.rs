@@ -1,5 +1,5 @@
 use super::*;
-use rockbee_client::Client;
+use rockbee_client::RockBeeClient;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::AsyncReadExt;
 
@@ -62,7 +62,7 @@ async fn writing_response_leaves_admission_for_the_next_request() -> Result<()> 
 
 // The peer can observe the last response byte on another runtime thread before
 // the writer task resumes and drops its response admission. Replenishing a
-// full, healthy Client window must not be mistaken for new overload.
+// full, healthy RockBeeClient window must not be mistaken for new overload.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn completed_gets_can_replenish_the_full_default_window() -> Result<()> {
     let rpc = RpcServer::bind("127.0.0.1:0").await?;
@@ -87,7 +87,7 @@ async fn completed_gets_can_replenish_the_full_default_window() -> Result<()> {
             Ok(())
         },
     ));
-    let client = Client::connect(&address).await?;
+    let client = RockBeeClient::connect(&address).await?;
     let mut workers = JoinSet::new();
     for index in 0..INTERNAL_MAX_IN_FLIGHT {
         let client = client.clone();

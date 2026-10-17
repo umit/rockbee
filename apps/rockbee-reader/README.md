@@ -1,23 +1,31 @@
-# Reader
+# Rockbee reader
 
-Package and binary: `rockbee-reader`.
+`rockbee-reader` owns the read-only SlateDB engine in [its library](src/lib.rs).
+The executable fixes its role to reader; conflicting CLI or TOML roles fail before
+binding or opening storage. Shared configuration and RPC lifecycle helpers live
+in `rockbee-runtime`.
 
-This entrypoint always opens the read-only role. A conflicting role in CLI
-arguments or TOML is an error. The [main function](src/main.rs) calls `rockbee_node::reader::run`. Reader
-SlateDB operations live in [the reader module](../../crates/rockbee-node/src/reader);
-configuration, startup and TCP handling are shared in the
-[rockbee-node library](../../crates/rockbee-node/README.md).
-
-This binary is its own process, listening on port `7102` by default. Its RAM
-is separate from the gateway and writer processes.
-
-From the repository root, after starting the writer on the same bucket/prefix:
-
-```sh
-make reader
+```text
+RockBeeClient -> Gateway -> Reader -> SlateDB -> object store (raw/table GET)
+                           +-> DuckDB -> published Parquet (table SQL)
 ```
 
-Each reader has its own SlateDB RAM cache. Reads can lag durable writer ACKs;
-readiness does not promise immediate read-after-write visibility. See
-[reader configuration](../../configs/reader.toml) and
-[how reads become visible](../../README.md#how-it-works).
+Readers reject all mutations and may lag the writer. Raw and table GETs use
+SlateDB's own caches; SQL uses the independently published Parquet projection.
+Reader freshness and SQL projection freshness are separate eventual processes.
+
+Reader SQL limits are configured at startup in the top-level TOML `[query]`
+section, separately from SlateDB's `[reader]` and `[memory]` options:
+
+```toml
+[query]
+timeout_ms = 4000
+memory_limit_mb = 256
+max_concurrent = 2
+```
+
+`timeout_ms` must be positive and produce a representable deadline.
+`memory_limit_mb` accepts 1–16384 MB per DuckDB connection; `max_concurrent`
+accepts 1–128 workers per reader. These limits are not a process RSS ceiling.
+`rockbee-reader --config configs/reader.toml --check-config` prints resolved
+values without opening storage. Writers reject a `[query]` section.

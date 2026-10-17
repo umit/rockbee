@@ -1,5 +1,5 @@
 use super::*;
-use rockbee_client::Client;
+use rockbee_client::RockBeeClient;
 use rockbee_protocol::transport::{FrameReader, read_frame};
 use rockbee_protocol::{RequestEnvelope, encode_frame};
 use std::sync::Arc;
@@ -203,7 +203,7 @@ async fn legacy_write_half_close_cancels_pending_work_with_or_without_staged_fra
             );
             wait_dropped(&live).await?;
             assert_eq!(calls.load(Ordering::SeqCst), 1, "staged={staged}");
-            let client = Client::connect(&address).await?;
+            let client = RockBeeClient::connect(&address).await?;
             let key = b"replacement-after-legacy-eof\0\xff";
             assert_eq!(
                 client.get(key).await?,
@@ -361,7 +361,7 @@ async fn legacy_lookahead_rejects_invalid_or_overfull_next_frames_without_runnin
                 1,
                 "{name}: queued request reached handler"
             );
-            let client = Client::connect(&address).await?;
+            let client = RockBeeClient::connect(&address).await?;
             let key = b"replacement-after-invalid-legacy\xff\0";
             assert_eq!(client.get(key).await?, Some(key.to_vec()), "{name}");
             assert_eq!(calls.load(Ordering::SeqCst), 2, "{name}");

@@ -1,4 +1,4 @@
-use rockbee_client::{Client, Result};
+use rockbee_client::{Result, RockBeeClient};
 use rockbee_protocol::{RequestEnvelope, Response, ResponseEnvelope, read_frame, write_frame};
 use std::io::BufReader;
 use std::net::TcpListener;
@@ -28,7 +28,7 @@ fn timed_out_connection_cannot_return_a_stale_response() -> Result<()> {
     });
 
     let runtime = tokio::runtime::Runtime::new()?;
-    let client = runtime.block_on(Client::connect(&address))?;
+    let client = runtime.block_on(RockBeeClient::connect(&address))?;
     let error = runtime.block_on(client.get(b"first")).unwrap_err();
     let message = error.to_string();
     assert!(message.contains("upstream request timed out"));
@@ -64,7 +64,7 @@ fn mismatched_response_id_is_rejected_and_retires_the_connection() -> Result<()>
     });
 
     let runtime = tokio::runtime::Runtime::new()?;
-    let client = runtime.block_on(Client::connect(&address))?;
+    let client = runtime.block_on(RockBeeClient::connect(&address))?;
     assert!(
         runtime.block_on(client.get(b"first")).is_err(),
         "mismatched ID must fail"
@@ -97,7 +97,7 @@ fn wrong_response_kind_is_rejected_and_retires_the_connection() -> Result<()> {
     });
 
     let runtime = tokio::runtime::Runtime::new()?;
-    let client = runtime.block_on(Client::connect(&address))?;
+    let client = runtime.block_on(RockBeeClient::connect(&address))?;
     assert!(
         runtime.block_on(client.get(b"key")).is_err(),
         "GET must reject OK"
@@ -145,7 +145,7 @@ fn client_preserves_binary_values_and_distinguishes_missing_from_empty() -> Resu
     });
 
     let runtime = tokio::runtime::Runtime::new()?;
-    let client = runtime.block_on(Client::connect(&address))?;
+    let client = runtime.block_on(RockBeeClient::connect(&address))?;
     assert_eq!(runtime.block_on(client.get(&[0, 255]))?, None);
     assert_eq!(runtime.block_on(client.get(b"empty"))?, Some(Vec::new()));
     server.join().unwrap();
@@ -183,7 +183,7 @@ fn cloned_blocking_clients_multiplex_out_of_order_binary_gets() -> Result<()> {
     });
 
     let runtime = Arc::new(tokio::runtime::Runtime::new()?);
-    let client = Arc::new(runtime.block_on(Client::connect(&address))?);
+    let client = Arc::new(runtime.block_on(RockBeeClient::connect(&address))?);
     let start = Arc::new(Barrier::new(3));
     let first_client = Arc::clone(&client);
     let first_start = Arc::clone(&start);

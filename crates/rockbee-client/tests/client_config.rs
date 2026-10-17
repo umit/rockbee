@@ -1,4 +1,4 @@
-use rockbee_client::{Client, ClientConfig, MutationOutcome, Result};
+use rockbee_client::{ClientConfig, MutationOutcome, Result, RockBeeClient};
 use rockbee_protocol::transport::{FrameReader, read_frame, write_frame};
 use rockbee_protocol::{Request, RequestEnvelope, Response, ResponseEnvelope};
 use tokio::net::TcpListener;
@@ -72,7 +72,7 @@ async fn configured_active_and_pending_limits_reject_excess_put_locally() -> Res
     });
 
     let config = ClientConfig::new(Duration::from_secs(1), 1, 1)?;
-    let client = Client::connect_with_config(&address, config).await?;
+    let client = RockBeeClient::connect_with_config(&address, config).await?;
     let first = client.put(b"first", b"one", None);
     timeout(Duration::from_secs(1), first_received_waiter).await??;
     let second = client.put(b"second", b"two", None);
@@ -123,7 +123,7 @@ async fn configured_timeout_applies_to_put_without_replaying_the_mutation() -> R
     });
 
     let config = ClientConfig::new(Duration::from_millis(150), 1, 1)?;
-    let client = Client::connect_with_config(&address, config).await?;
+    let client = RockBeeClient::connect_with_config(&address, config).await?;
     let error = timeout(Duration::from_secs(2), client.put(b"put", b"value", None))
         .await?
         .expect_err("peer withholds the PUT acknowledgement");
@@ -148,7 +148,7 @@ async fn configured_timeout_applies_to_get() -> Result<()> {
     });
 
     let config = ClientConfig::new(Duration::from_millis(150), 1, 1)?;
-    let client = Client::connect_with_config(&address, config).await?;
+    let client = RockBeeClient::connect_with_config(&address, config).await?;
     timeout(Duration::from_secs(2), client.get(b"get"))
         .await?
         .expect_err("peer withholds the GET response");
@@ -184,7 +184,7 @@ async fn configured_timeout_applies_to_delete_without_replaying_the_mutation() -
     });
 
     let config = ClientConfig::new(Duration::from_millis(150), 1, 1)?;
-    let client = Client::connect_with_config(&address, config).await?;
+    let client = RockBeeClient::connect_with_config(&address, config).await?;
     let error = timeout(Duration::from_secs(2), client.delete(b"delete"))
         .await?
         .expect_err("peer withholds the DELETE acknowledgement");

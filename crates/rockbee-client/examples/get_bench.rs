@@ -1,5 +1,5 @@
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use rockbee_client::Client;
+use rockbee_client::RockBeeClient;
 use rockbee_protocol::MAX_FRAME;
 use serde_json::json;
 use std::env;
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let fixtures = fixtures(&config.namespace, config.keys, config.value_bytes)?;
-    let client = Client::connect(&config.address).await?;
+    let client = RockBeeClient::connect(&config.address).await?;
     if config.mode == Mode::VerifyOnly {
         let started = Instant::now();
         verify_existing(&client, &fixtures, config.concurrency).await?;
@@ -209,7 +209,7 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
             "fixture_keys": config.keys,
             "fixture_value_bytes": config.value_bytes,
             "fixture_total_value_bytes": config.keys * config.value_bytes,
-            "fixture_preparation": "durable PUT handles awaited through the same public Client before the timed window",
+            "fixture_preparation": "durable PUT handles awaited through the same public RockBeeClient before the timed window",
             "warmup": "every fixture key returned its exact expected bytes before timing; records may reside in reader WAL memtables",
             "producer_pattern": "one closed-loop bounded FuturesUnordered pipeline",
             "attempts": stats.attempts,
@@ -239,7 +239,7 @@ struct TimedRun {
 }
 
 async fn timed_get(
-    client: &Client,
+    client: &RockBeeClient,
     fixtures: &[Arc<Fixture>],
     config: &Config,
 ) -> Result<TimedRun, Box<dyn std::error::Error + Send + Sync>> {
@@ -277,7 +277,7 @@ async fn timed_get(
 }
 
 async fn print_existing_fixture_measurement(
-    client: &Client,
+    client: &RockBeeClient,
     fixtures: &[Arc<Fixture>],
     config: &Config,
     preflight_seconds: f64,
@@ -335,7 +335,7 @@ async fn print_existing_fixture_measurement(
 }
 
 async fn prepare(
-    client: &Client,
+    client: &RockBeeClient,
     fixtures: &[Arc<Fixture>],
     concurrency: usize,
 ) -> rockbee_client::Result<()> {
@@ -354,7 +354,7 @@ async fn prepare(
     Ok(())
 }
 
-async fn put_fixture(client: Client, fixture: Arc<Fixture>) -> rockbee_client::Result<()> {
+async fn put_fixture(client: RockBeeClient, fixture: Arc<Fixture>) -> rockbee_client::Result<()> {
     client
         .put(&fixture.key, &fixture.value, None)
         .await
@@ -362,7 +362,7 @@ async fn put_fixture(client: Client, fixture: Arc<Fixture>) -> rockbee_client::R
 }
 
 async fn converge(
-    client: &Client,
+    client: &RockBeeClient,
     fixtures: &[Arc<Fixture>],
     concurrency: usize,
 ) -> rockbee_client::Result<()> {
@@ -380,7 +380,7 @@ async fn converge(
 }
 
 async fn verify_existing(
-    client: &Client,
+    client: &RockBeeClient,
     fixtures: &[Arc<Fixture>],
     concurrency: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -398,7 +398,7 @@ async fn verify_existing(
 }
 
 async fn verify_exact_pass(
-    client: &Client,
+    client: &RockBeeClient,
     fixtures: &[Arc<Fixture>],
     concurrency: usize,
 ) -> rockbee_client::Result<usize> {
@@ -421,7 +421,10 @@ async fn verify_exact_pass(
     Ok(missing)
 }
 
-async fn verify_fixture(client: Client, fixture: Arc<Fixture>) -> rockbee_client::Result<bool> {
+async fn verify_fixture(
+    client: RockBeeClient,
+    fixture: Arc<Fixture>,
+) -> rockbee_client::Result<bool> {
     match client.get(&fixture.key).await? {
         None => Ok(true),
         Some(value) if value == fixture.value => Ok(false),
@@ -434,7 +437,7 @@ async fn verify_fixture(client: Client, fixture: Arc<Fixture>) -> rockbee_client
 }
 
 async fn matches_all(
-    client: &Client,
+    client: &RockBeeClient,
     fixtures: &[Arc<Fixture>],
     concurrency: usize,
 ) -> rockbee_client::Result<bool> {
@@ -454,11 +457,14 @@ async fn matches_all(
     Ok(matched)
 }
 
-async fn matches_fixture(client: Client, fixture: Arc<Fixture>) -> rockbee_client::Result<bool> {
+async fn matches_fixture(
+    client: RockBeeClient,
+    fixture: Arc<Fixture>,
+) -> rockbee_client::Result<bool> {
     Ok(client.get(&fixture.key).await?.as_deref() == Some(fixture.value.as_slice()))
 }
 
-async fn issue_get(client: Client, fixture: Arc<Fixture>) -> GetCompletion {
+async fn issue_get(client: RockBeeClient, fixture: Arc<Fixture>) -> GetCompletion {
     let started = Instant::now();
     let result = client.get(&fixture.key).await;
     let finished = Instant::now();
@@ -928,7 +934,7 @@ mod tests {
             value: Some(fixture[0].value.clone()),
         })
         .await;
-        let client = Client::connect(&address).await.unwrap();
+        let client = RockBeeClient::connect(&address).await.unwrap();
         verify_existing(&client, &fixture, 1).await.unwrap();
         assert_eq!(
             server.await.unwrap(),
@@ -942,7 +948,7 @@ mod tests {
     async fn verify_only_checks_every_fixture_key_with_out_of_order_responses() {
         let fixtures = fixtures("existing", 3, 8).unwrap();
         let (address, server) = exact_get_server(fixtures.clone()).await;
-        let client = Client::connect(&address).await.unwrap();
+        let client = RockBeeClient::connect(&address).await.unwrap();
         tokio::time::timeout(
             Duration::from_secs(1),
             verify_existing(&client, &fixtures, 3),
@@ -966,7 +972,7 @@ mod tests {
             value: Some(vec![1; 8]),
         })
         .await;
-        let client = Client::connect(&address).await.unwrap();
+        let client = RockBeeClient::connect(&address).await.unwrap();
         let error = verify_existing(&client, &fixture, 1).await.unwrap_err();
         assert!(error.to_string().contains("nonmatching bytes"));
         assert!(matches!(server.await.unwrap(), Request::Get { .. }));
@@ -976,7 +982,7 @@ mod tests {
     async fn verify_only_rejects_a_missing_fixture() {
         let fixture = fixtures("existing", 1, 8).unwrap();
         let (address, server) = get_server(Response::Value { value: None }).await;
-        let client = Client::connect(&address).await.unwrap();
+        let client = RockBeeClient::connect(&address).await.unwrap();
         let error = verify_existing(&client, &fixture, 1).await.unwrap_err();
         assert!(error.to_string().contains("1 fixture keys were missing"));
         assert!(matches!(server.await.unwrap(), Request::Get { .. }));

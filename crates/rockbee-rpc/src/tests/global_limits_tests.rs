@@ -211,7 +211,7 @@ async fn global_admission_recovers_after_mux_eof() -> Result<()> {
 
 #[tokio::test]
 async fn malformed_peer_releases_capacity_without_canceling_another_client() -> Result<()> {
-    use rockbee_client::Client;
+    use rockbee_client::RockBeeClient;
     use rockbee_protocol::MAX_FRAME;
 
     let mut truncated = request(2, b"must-not-run");
@@ -281,7 +281,7 @@ async fn malformed_peer_releases_capacity_without_canceling_another_client() -> 
             output.write_all(&request(1, b"bad-hold")).await?;
             bad_entered.notified().await;
 
-            let healthy = Client::connect(&address).await?;
+            let healthy = RockBeeClient::connect(&address).await?;
             pending.spawn({
                 let healthy = healthy.clone();
                 async move { healthy.get(b"healthy-\0\xff").await }
@@ -305,11 +305,11 @@ async fn malformed_peer_releases_capacity_without_canceling_another_client() -> 
 
             // EOF and handler Drop may precede the connection owner's final
             // socket-permit release. Explicit retries here are GET-only and
-            // bounded; the production Client does not replay requests.
+            // bounded; the production RockBeeClient does not replay requests.
             let replacement = timeout(Duration::from_secs(1), async {
                 let mut last_error = None;
                 for _ in 0..32 {
-                    let client = Client::connect(&address).await?;
+                    let client = RockBeeClient::connect(&address).await?;
                     match client.get(b"replacement-\xff\0").await {
                         Ok(value) => {
                             assert_eq!(value, Some(b"replacement-\xff\0".to_vec()), "{case}");
@@ -349,7 +349,7 @@ async fn malformed_peer_releases_capacity_without_canceling_another_client() -> 
 
 #[tokio::test]
 async fn legacy_eof_cancels_held_handler_and_releases_global_admission() -> Result<()> {
-    use rockbee_client::Client;
+    use rockbee_client::RockBeeClient;
     use tokio::task::JoinSet;
 
     let config = RpcConfig::new(2, Duration::from_secs(10), Duration::from_secs(1))?
@@ -405,7 +405,7 @@ async fn legacy_eof_cancels_held_handler_and_releases_global_admission() -> Resu
         })
         .await?;
 
-        let client = Client::connect(&address).await?;
+        let client = RockBeeClient::connect(&address).await?;
         let key = b"after-legacy-eof\0\xff";
         assert_eq!(client.get(key).await?, Some(key.to_vec()));
         assert_eq!(calls.load(Ordering::SeqCst), 2);

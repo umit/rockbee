@@ -25,6 +25,11 @@ possible future use case.
   threads, and keep lock-held work small. Release synchronous locks before an
   `.await`; use an async lock only when the operation needs it.
 
+On macOS, install Apple's Command Line Tools. If bundled DuckDB cannot find C++
+headers, set `CXXFLAGS="-isystem $(xcrun --sdk macosx --show-sdk-path)/usr/include/c++/v1"`
+for Cargo. In RustRover, add `CXXFLAGS` under **Settings > Rust > Environment
+variables**, using the resolved SDK path rather than shell substitution.
+
 Read the root README, the relevant package README, and existing tests before a
 change. Local notes in sibling `../rockbee-docs/` are optional context, not a
 build or contribution prerequisite.
@@ -34,7 +39,7 @@ build or contribution prerequisite.
 Add a focused, meaningful regression test with the package that owns the
 behavior. Unit tests stay with code; reusable crate integration tests stay under
 that crate. The opt-in LocalStack integration test belongs to
-`crates/rockbee-node/tests/`.
+`crates/rockbee-test-support/tests/`.
 
 ## Verify
 
