@@ -1,0 +1,31 @@
+[package]
+name = "rockbee-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Local end-to-end Criterion benchmarks for Rockbee"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+benchmarks = ["dep:criterion", "dep:futures-util", "dep:rockbee-client", "dep:serde_json", "dep:tokio", "dep:uuid"]
+
+[dependencies]
+criterion = { version = "0.8.2", features = ["async_tokio", "html_reports"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+rockbee-client = { path = "../../crates/rockbee-client", optional = true }
+serde_json = { version = "1", optional = true }
+tokio = { workspace = true, optional = true }
+uuid = { version = "1", features = ["v7"], optional = true }
+
+[[bench]]
+name = "warm_get"
+harness = false
+required-features = ["benchmarks"]
+
+[[test]]
+name = "shutdown"
+required-features = ["benchmarks"]
