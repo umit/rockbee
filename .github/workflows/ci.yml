@@ -29,6 +29,8 @@ jobs:
     env:
       # Preserve the previous CI setting and avoid caching incremental artifacts.
       CARGO_INCREMENTAL: "0"
+      # GNU ld exhausted ARM runner memory when linking DuckDB test binaries in parallel.
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -36,7 +38,7 @@ jobs:
       - name: Install native build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y build-essential cmake perl pkg-config
+          sudo apt-get install --no-install-recommends -y build-essential cmake lld perl pkg-config
       - name: Install Rust
         # rustup installs the toolchain and components from rust-toolchain.toml.
         run: rustup show active-toolchain

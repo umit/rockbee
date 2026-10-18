@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_INCREMENTAL: "0"
+      # Match CI's linker so restored dependency fingerprints remain reusable.
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -25,7 +27,7 @@ jobs:
       - name: Install native build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y build-essential cmake perl pkg-config
+          sudo apt-get install --no-install-recommends -y build-essential cmake lld perl pkg-config
       - name: Install Rust
         run: rustup show active-toolchain
       - name: Cache Cargo downloads
