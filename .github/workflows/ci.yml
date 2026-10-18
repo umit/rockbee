@@ -16,6 +16,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: rockbee-ci
+  cancel-in-progress: false
+
 jobs:
   verify:
     name: Build & Test
