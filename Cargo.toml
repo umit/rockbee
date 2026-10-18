@@ -11,6 +11,7 @@ members = [
   "apps/rockbee-reader",
   "tools/rockbee-cli",
   "tools/rockbee-cdc",
+  "tools/rockbee-bench",
 ]
 resolver = "3"
 
