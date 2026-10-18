@@ -8,10 +8,6 @@ on:
       - "site/**"
       - ".github/assets/**"
   pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "site/**"
-      - ".github/assets/**"
 
 permissions:
   contents: read
@@ -35,14 +31,41 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Determine required checks
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_tests=true
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            git diff --no-renames --name-only -z "$BASE_SHA...$HEAD_SHA" -- . ':!.herdr' ':!.herdr/**' > "$RUNNER_TEMP/rockbee-ci-files"
+            run_tests=false
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                *.md|site/*|.github/assets/*) ;;
+                *) run_tests=true; break ;;
+              esac
+            done < "$RUNNER_TEMP/rockbee-ci-files"
+          fi
+          echo "run_tests=$run_tests" >> "$GITHUB_OUTPUT"
+      - name: Documentation and website changes
+        if: steps.changes.outputs.run_tests == 'false'
+        run: echo "Only documentation, website, or artwork changed; Rust checks are not needed."
       - name: Install native build tools
+        if: steps.changes.outputs.run_tests == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y build-essential cmake lld perl pkg-config
       - name: Install Rust
+        if: steps.changes.outputs.run_tests == 'true'
         # rustup installs the toolchain and components from rust-toolchain.toml.
         run: rustup show active-toolchain
       - name: Restore Cargo downloads
+        if: steps.changes.outputs.run_tests == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -52,6 +75,7 @@ jobs:
           restore-keys: |
             cargo-v1-${{ runner.os }}-${{ runner.arch }}-
       - name: Restore compiled dependencies
+        if: steps.changes.outputs.run_tests == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
@@ -59,4 +83,5 @@ jobs:
           restore-keys: |
             build-v1-ubuntu-24.04-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-
       - name: Format, lint, and Rust tests
+        if: steps.changes.outputs.run_tests == 'true'
         run: make verify
