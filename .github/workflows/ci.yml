@@ -30,5 +30,13 @@ jobs:
       - name: Install Rust
         # rustup installs the toolchain and components from rust-toolchain.toml.
         run: rustup show active-toolchain
+      - name: Cache Rust dependencies and DuckDB build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # GitHub stores Cargo downloads and dependency artifacts in target/,
+          # including DuckDB's native build, keyed by Rust and dependency versions.
+          key: ${{ runner.os }}-${{ runner.arch }}
+          cache-provider: github
+          cache-bin: "false"
       - name: Format, lint, and Rust tests
         run: make verify
