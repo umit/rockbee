@@ -47,9 +47,27 @@ jobs:
       - name: Download dependencies
         run: cargo fetch --locked
       - name: Prepare Clippy build artifacts
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: |
+          df -h .
+          free -h
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          df -h .
+          free -h
       - name: Prepare test build artifacts without running tests
-        run: cargo test --workspace --all-targets --locked --no-run
+        # Capture runner pressure before a possible external termination.
+        run: |
+          (
+            while true; do
+              date -u
+              df -h .
+              free -h
+              ps -eo pid,comm,rss --sort=-rss | sed -n '1,8p'
+              sleep 30
+            done
+          ) &
+          resource_monitor_pid=$!
+          trap 'kill "$resource_monitor_pid" 2>/dev/null || true' EXIT
+          cargo test --workspace --all-targets --locked --no-run
       - name: Keep dependency artifacts for the cache
         # Remove only our workspace outputs, retaining SlateDB, DuckDB and other dependencies.
         run: cargo clean --workspace --locked --offline
