@@ -1,0 +1,55 @@
+name: Cache Dependencies
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Share the group with CI so cache preparation and tests run one at a time.
+concurrency:
+  group: rockbee-ci
+  cancel-in-progress: false
+
+jobs:
+  cache:
+    name: Compile and cache dependencies
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential cmake perl pkg-config
+      - name: Install Rust
+        run: rustup show active-toolchain
+      - name: Cache Cargo downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Cache compiled dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: build-v1-ubuntu-24.04-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'apps/*/Cargo.toml', 'tools/*/Cargo.toml', '.cargo/config.toml', 'Makefile', '.github/workflows/ci.yml', '.github/workflows/cache.yml') }}
+          restore-keys: |
+            build-v1-ubuntu-24.04-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Download dependencies
+        run: cargo fetch --locked
+      - name: Prepare Clippy build artifacts
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Prepare test build artifacts without running tests
+        run: cargo test --workspace --all-targets --locked --no-run
+      - name: Keep dependency artifacts for the cache
+        # Remove only our workspace outputs, retaining SlateDB, DuckDB and other dependencies.
+        run: cargo clean --workspace --locked --offline

@@ -26,6 +26,9 @@ jobs:
     runs-on: ubuntu-24.04-arm
     # A cold DuckDB build and the initial cache upload can exceed 30 minutes.
     timeout-minutes: 60
+    env:
+      # Preserve the previous CI setting and avoid caching incremental artifacts.
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -37,13 +40,21 @@ jobs:
       - name: Install Rust
         # rustup installs the toolchain and components from rust-toolchain.toml.
         run: rustup show active-toolchain
-      - name: Cache Rust dependencies and DuckDB build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Restore Cargo downloads
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          # GitHub stores Cargo downloads and dependency artifacts in target/,
-          # including DuckDB's native build, keyed by Rust and dependency versions.
-          key: ${{ runner.os }}-${{ runner.arch }}
-          cache-provider: github
-          cache-bin: "false"
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-v1-${{ runner.os }}-${{ runner.arch }}-
+      - name: Restore compiled dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: build-v1-ubuntu-24.04-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'apps/*/Cargo.toml', 'tools/*/Cargo.toml', '.cargo/config.toml', 'Makefile', '.github/workflows/ci.yml', '.github/workflows/cache.yml') }}
+          restore-keys: |
+            build-v1-ubuntu-24.04-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml') }}-
       - name: Format, lint, and Rust tests
         run: make verify
