@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f7f4">
+  <title>Rockbee Console — Coming soon to Enterprise Edition</title>
+  <meta name="description" content="A first look at Rockbee Console: a workspace for byte keys, JSON documents, and SQL. Coming soon to Rockbee Enterprise Edition.">
+  <link rel="canonical" href="https://umitunal.net/rockbee/console.html">
+  <meta property="og:site_name" content="Rockbee">
+  <meta property="og:url" content="https://umitunal.net/rockbee/console.html">
+  <meta property="og:title" content="Rockbee Console — Coming soon to Enterprise Edition">
+  <meta property="og:description" content="Explore the Key-value and JSON tables design previews. Coming soon to Rockbee Enterprise Edition.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://umitunal.net/rockbee/assets/console-kv-preview.png">
+  <meta property="og:image:alt" content="Rockbee Console Key-value workspace design preview with sample data">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="assets/favicon.svg?v=f01594a54b8c" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css?v=2accdae430fa">
+  <link rel="stylesheet" href="assets/console-section.css?v=ee425e30e3c1">
+  <script src="assets/console-section.js?v=a2ab3faa0532" defer></script>
+</head>
+<body class="console-page">
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="header shell">
+    <a class="brand" href="./" aria-label="Rockbee home"><svg class="brand-logo" viewBox="120 145 1810 445" aria-hidden="true"><image href="assets/rockbee-logo-transparent.png" width="2007" height="784"/></svg></a>
+    <nav aria-label="Main navigation"><a href="./">Overview</a><a class="console-how-link" href="explain.html">How it works</a><a class="source-link" href="https://github.com/umit/rockbee">GitHub <span aria-hidden="true">↗</span></a></nav>
+  </header>
+  <main id="main">
+    <section class="console-section" id="console" aria-labelledby="console-title">
+      <div class="shell">
+        <div class="section-heading console-heading">
+          <div><p class="eyebrow">ENTERPRISE EDITION / COMING SOON</p><h1 id="console-title">Rockbee Console.<br><span>Your data, in view.</span></h1></div>
+          <div class="console-intro"><p>A dedicated workspace for your keys and JSON tables. Inspect byte values, explore documents, and keep SQL alongside your data.</p><p class="console-availability">Coming soon to Rockbee Enterprise Edition.</p></div>
+        </div>
+
+        <div class="console-preview" data-console-preview>
+          <div class="console-tabs" role="tablist" aria-label="Rockbee Console previews">
+            <button type="button" id="console-tab-kv" role="tab" aria-selected="true" aria-controls="console-panel-kv" data-console-tab="kv">Key-value <span>→</span></button>
+            <button type="button" id="console-tab-tables" role="tab" aria-selected="false" aria-controls="console-panel-tables" tabindex="-1" data-console-tab="tables">JSON tables <span>{ }</span></button>
+            <span class="console-sample-label">DESIGN PREVIEW / SAMPLE DATA</span>
+          </div>
+
+          <div id="console-panel-kv" class="console-panel" role="tabpanel" aria-labelledby="console-tab-kv" tabindex="0" data-console-panel="kv">
+            <div class="console-panel-copy"><span class="small-label">KEY-VALUE / BYTES FIRST</span><p>Open an exact key and inspect the same stored value as JSON, text, or hex.</p></div>
+            <a class="console-shot-link" href="assets/console-kv-preview.png" target="_blank" rel="noopener" aria-label="Open the Key-value Console preview at full size"><img src="assets/console-kv-preview.png" width="1440" height="1040" loading="lazy" decoding="async" alt="Rockbee Console Key-value workspace showing pinned keys and a JSON value inspector"></a>
+          </div>
+
+          <div id="console-panel-tables" class="console-panel" role="tabpanel" aria-labelledby="console-tab-tables" tabindex="0" data-console-panel="tables" hidden>
+            <div class="console-panel-copy"><span class="small-label">JSON TABLES / DOCUMENTS AND SQL</span><p>Browse documents in a table, then run a query against that selected table.</p></div>
+            <a class="console-shot-link" href="assets/console-tables-preview.png" target="_blank" rel="noopener" aria-label="Open the JSON tables Console preview at full size"><img src="assets/console-tables-preview.png" width="1440" height="1040" loading="lazy" decoding="async" alt="Rockbee Console JSON tables workspace showing a product document grid with Documents and SQL editor tabs"></a>
+          </div>
+        </div>
+        <p class="console-preview-note">Design preview with sample data. Select an image to view it at full size.</p>
+      </div>
+    </section>
+
+  </main>
+  <footer class="footer shell"><a class="brand" href="./" aria-label="Rockbee home"><svg class="brand-logo" viewBox="120 145 1810 445" aria-hidden="true"><image href="assets/rockbee-logo-transparent.png" width="2007" height="784"/></svg></a><p>Built in Rust on <a href="https://github.com/slatedb/slatedb">SlateDB</a>. SQL by <a href="https://duckdb.org/">DuckDB</a>.</p><div><a href="explain.html">Inside Rockbee ↗</a><a href="https://github.com/umit/rockbee#try-it-locally">Documentation ↗</a><a href="https://github.com/umit/rockbee">Source ↗</a></div><div class="footer-legal"><span>© 2026 Rockbee contributors.</span><a href="https://github.com/umit/rockbee/blob/main/LICENSE">Source license: Apache 2.0 ↗</a></div></footer>
+</body>
+</html>
