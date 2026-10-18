@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f7f4">
+  <title>Inside Rockbee — Follow a record from API to object storage.</title>
+  <meta name="description" content="An interactive technical guide to Rockbee: durable writes, independent readers, SlateDB, DuckDB, Parquet, and the tradeoffs behind the architecture.">
+  <link rel="canonical" href="https://umitunal.net/rockbee/explain.html">
+  <meta property="og:title" content="Inside Rockbee — Follow one record.">
+  <meta property="og:description" content="Step through a write, watch readers catch up, and see how JSON becomes queryable Parquet.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://umitunal.net/rockbee/explain.html">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/explain.css?v=aa1969552656">
+  <link rel="stylesheet" href="assets/syntax.css">
+  <script src="assets/prism.js" defer></script>
+  <script src="assets/syntax.js" defer></script>
+  <script src="assets/explain.js?v=8f5c1f1cd79f" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header wrap">
+    <a class="brand" href="./" aria-label="Rockbee home"><svg viewBox="120 145 1810 445" aria-hidden="true"><image href="assets/rockbee-logo-transparent.png" width="2007" height="784"/></svg></a>
+    <nav aria-label="Main navigation"><a href="./">Overview</a><a href="#compare">The tradeoffs</a><a class="nav-source" href="https://github.com/umit/rockbee">Source <span aria-hidden="true">↗</span></a></nav>
+  </header>
+  <main id="main">
+    <section class="intro wrap" aria-labelledby="page-title">
+      <div class="eyebrow"><span class="small-square" aria-hidden="true"></span> INSIDE ROCKBEE <span class="intro-edition">AN INTERACTIVE FIELD GUIDE</span></div>
+      <div class="intro-grid">
+        <h1 id="page-title">Follow one record.<br><em>Understand the system.</em></h1>
+        <div class="intro-copy"><p>A small API has a lot happening underneath. Walk a request through Rockbee, move data between its views, and see exactly what shared object storage changes.</p><a class="text-link" href="#request">Start with a write <span aria-hidden="true">↓</span></a></div>
+      </div>
+      <div class="intro-facts"><span><b>01</b> Durable writes</span><span><b>02</b> Independent readers</span><span><b>03</b> SQL over Parquet</span></div>
+    </section>
+
+    <nav class="chapter-nav" aria-label="Guide chapters"><div class="wrap"><a href="#request">01 / Request</a><a href="#freshness">02 / Visibility</a><a href="#storage">03 / Storage &amp; scale</a><a href="#compare">04 / Tradeoffs</a><a href="#internals">05 / Under the hood</a></div></nav>
+
+    <section class="chapter wrap" id="request" aria-labelledby="request-title">
+      <div class="section-top"><p class="eyebrow">01 / FOLLOW THE REQUEST</p><span class="annotation">ILLUSTRATIVE WALKTHROUGH · NO LIVE CLUSTER</span></div>
+      <div class="section-heading"><h2 id="request-title">One API.<br>Different paths.</h2><p>Pick an operation. Advance one step at a time to see who does the work, what gets stored, and when the client can call it done.</p></div>
+      <noscript><p class="notice">Enable JavaScript for the interactive walkthroughs. The architecture, comparisons, and technical reference below remain readable.</p></noscript>
+      <div class="trace-shell">
+        <div class="trace-toolbar"><div class="button-group" role="group" aria-label="Choose a request"><button type="button" data-trace="put" aria-pressed="true">PUT <span>write a product</span></button><button type="button" data-trace="get" aria-pressed="false">GET <span>read by ID</span></button><button type="button" data-trace="sql" aria-pressed="false">SQL <span>query products</span></button><button type="button" data-trace="delete" aria-pressed="false">DELETE <span>remove a product</span></button></div><span class="trace-tag">products / product-42</span></div>
+        <div class="trace-grid">
+          <div class="network">
+            <div class="network-label"><span>COMPUTE + SHARED STORAGE</span><span><i aria-hidden="true"></i> Current step</span></div>
+            <svg class="network-svg" viewBox="0 0 870 555" role="img" aria-labelledby="network-title network-desc">
+              <title id="network-title">Rockbee request architecture</title><desc id="network-desc">The client connects to the gateway. Writes go to one writer using SlateDB and object storage. Reads go to independent readers. The writer's background exporter publishes Parquet; a reader downloads it to its local cache for DuckDB SQL. The current step is also explained in adjacent text.</desc>
+              <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"/></marker></defs>
+              <rect class="store-region" x="644" y="30" width="206" height="500" rx="12"/>
+              <text class="region-label" x="663" y="55">DURABLE OBJECTS</text>
+              <g class="edges" fill="none" marker-end="url(#arrow)">
+                <path data-edge="client-gateway" d="M180 110H225"/>
+                <path data-edge="gateway-writer" d="M390 110H445"/>
+                <path data-edge="gateway-reader" d="M307 150V263"/>
+                <path data-edge="writer-store" d="M610 110H665"/>
+                <path data-edge="writer-exporter" class="async-edge" d="M527 150V263"/>
+                <path data-edge="exporter-parquet" class="async-edge" d="M610 303H747V447"/>
+                <path data-edge="reader-store" d="M390 303H415V205H747V150"/>
+                <path data-edge="reader-parquet" d="M390 303H415V394H630V487H665"/>
+                <path data-edge="reader-duckdb" d="M307 343V447"/>
+                <path data-edge="parquet-duckdb" d="M665 487H390"/>
+              </g>
+              <g data-node="client" class="is-active" transform="translate(15 70)"><rect width="165" height="80" rx="7"/><text x="16" y="32" class="node-title">Client</text><text x="16" y="58" class="node-sub">Rust SDK</text></g>
+              <g data-node="gateway" transform="translate(225 70)"><rect width="165" height="80" rx="7"/><text x="16" y="32" class="node-title">Gateway</text><text x="16" y="58" class="node-sub">Route + bound</text></g>
+              <g data-node="writer" transform="translate(445 70)"><rect width="165" height="80" rx="7"/><text x="16" y="32" class="node-title">Writer</text><text x="16" y="58" class="node-sub">SlateDB</text></g>
+              <g data-node="store" transform="translate(665 70)"><rect width="165" height="80" rx="7"/><text x="16" y="32" class="node-title">WAL + SSTs</text><text x="16" y="58" class="node-sub">Shared KV data</text></g>
+              <g data-node="reader" transform="translate(225 263)"><rect width="165" height="80" rx="7"/><text x="16" y="32" class="node-title">Reader</text><text x="16" y="58" class="node-sub">SlateDB + cache</text></g>
+              <g data-node="exporter" transform="translate(445 263)"><rect width="165" height="80" rx="7"/><text x="16" y="32" class="node-title">Exporter</text><text x="16" y="58" class="node-sub">Inside writer</text></g>
+              <g data-node="duckdb" transform="translate(225 447)"><rect width="165" height="80" rx="7"/><text x="16" y="32" class="node-title">DuckDB</text><text x="16" y="58" class="node-sub">Inside reader</text></g>
+              <g data-node="parquet" transform="translate(665 447)"><rect width="165" height="80" rx="7"/><text x="16" y="32" class="node-title">Parquet</text><text x="16" y="58" class="node-sub">+ manifests</text></g>
+              <text class="edge-caption" x="42" y="199">TCP + PROTOBUF</text>
+              <text class="edge-caption" x="447" y="400">BACKGROUND PUBLICATION</text>
+              <text class="edge-caption" x="420" y="520">DOWNLOAD → LOCAL FILE CACHE</text>
+            </svg>
+            <div class="network-mobile" aria-label="Architecture components; highlighted components belong to the current step">
+              <div data-node="client" class="is-active"><strong>Client</strong><span>Rust SDK</span></div><div data-node="gateway"><strong>Gateway</strong><span>Routes requests</span></div>
+              <div data-node="writer"><strong>Writer</strong><span>Durable mutations</span></div><div data-node="reader"><strong>Reader</strong><span>Point reads + SQL</span></div>
+              <div data-node="store" class="wide-node"><strong>Shared KV data</strong><span>SlateDB WAL + SST files in object storage</span></div>
+              <div data-node="exporter"><strong>Exporter</strong><span>Inside writer</span></div><div data-node="duckdb"><strong>DuckDB</strong><span>Inside reader</span></div>
+              <div data-node="parquet" class="wide-node"><strong>Parquet + manifests</strong><span>Published SQL view in object storage</span></div>
+            </div>
+            <div class="network-foot"><span>Solid: request / data access</span><span>Dashed: asynchronous export</span></div>
+          </div>
+          <div class="trace-story">
+            <div class="trace-progress"><span id="trace-count">STEP 1 / 6</span><div id="trace-steps" role="group" aria-label="Jump to a request step"></div></div>
+            <div class="trace-narrative" aria-live="polite" aria-atomic="true"><p class="eyebrow" id="trace-kicker">CLIENT</p><h3 id="trace-title">Give the product an ID.</h3><p id="trace-body">The table handle uses the same bounded client connection as the key-value API. The document is a JSON object.</p></div>
+            <pre class="trace-code"><code id="trace-code" class="language-rust">let products = client.table("products");
+products.put_key("product-42", &amp;json!({
+    "name": "Trail Backpack", "price": 79
+}), None).await?;</code></pre>
+            <p class="trace-note" id="trace-note">PUT success acknowledges SlateDB durability. Reader and SQL visibility follow separately.</p>
+            <div class="trace-controls"><button class="quiet-button" id="trace-prev" type="button" disabled aria-label="Previous request step">← Back</button><button class="primary-button" id="trace-next" type="button">Next step →</button><button class="reset-button" id="trace-reset" type="button">Restart</button></div>
+          </div>
+        </div>
+      </div>
+      <p class="request-scope">Raw KV uses the same writer and reader routes. Only JSON table changes feed the Parquet projection.</p>
+      <p class="source-caption">The arrows follow real code: <a href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/apps/rockbee-gateway/src/router.rs">routing</a>, <a href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/apps/rockbee-writer/src/lib.rs">durable writes</a>, <a href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/reader.rs">SQL execution</a>.</p>
+    </section>
+
+    <section class="fresh-section" id="freshness" aria-labelledby="fresh-title"><div class="wrap chapter">
+      <p class="eyebrow">02 / MAKE EVENTUAL CONSISTENCY VISIBLE</p>
+      <div class="section-heading"><h2 id="fresh-title">Stored. Readable. Queryable.<br><em>Three different moments.</em></h2><p>Start with a published product at $79. Change it, refresh the reader, then publish SQL. Try deleting it before both views catch up.</p></div>
+      <div class="fresh-toolbar" role="group" aria-label="Change the illustrative product"><button class="primary-button" data-fresh-action="write" type="button">Write price +$10</button><button class="quiet-button" data-fresh-action="read" type="button">Refresh reader</button><button class="quiet-button" data-fresh-action="publish" type="button">Publish SQL view</button><button class="delete-button" data-fresh-action="delete" type="button">Delete product</button><button class="reset-button" data-fresh-action="reset" type="button">Reset</button></div>
+      <div class="fresh-grid">
+        <article class="fresh-card" id="writer-card" data-state="fresh"><div class="card-top"><span>01 / WRITER</span><span id="writer-version">v1</span></div><h3>Durable state</h3><p>What the writer has acknowledged.</p><pre><code id="writer-value" class="language-json">{"name":"Trail Backpack","price":79}</code></pre><span class="state-pill" id="writer-state">Durable</span></article>
+        <article class="fresh-card" id="reader-card" data-state="fresh"><div class="card-top"><span>02 / POINT READ</span><span id="reader-version">v1</span></div><h3>Reader’s view</h3><p>What <code>products.get(id)</code> can see.</p><pre><code id="reader-value" class="language-json">{"name":"Trail Backpack","price":79}</code></pre><span class="state-pill" id="reader-state">Caught up</span></article>
+        <article class="fresh-card" id="sql-card" data-state="fresh"><div class="card-top"><span>03 / SQL QUERY</span><span id="sql-version">v1</span></div><h3>Published view</h3><p>What the latest manifest exposes.</p><pre><code id="sql-value" class="language-json">{"name":"Trail Backpack","price":79}</code></pre><span class="state-pill" id="sql-state">Published</span></article>
+      </div>
+      <p class="fresh-message" id="fresh-message" role="status">All three views start at the same version. Write a new price to separate them.</p>
+      <div class="fine-print"><p>This is a model, with the catalogue already discovered. Buttons stand in for background work; they are not public client methods. GET and SQL can catch up in either order.</p><p>Delete changes logical visibility. Previously published Parquet files remain in object storage; automatic cleanup is not currently implemented.</p></div>
+    </div></section>
+
+    <section class="chapter wrap" id="storage" aria-labelledby="storage-title">
+      <p class="eyebrow">03 / THE ARCHITECTURAL CHOICE</p>
+      <div class="section-heading"><h2 id="storage-title">Compute comes and goes.<br><em>Durable data stays.</em></h2><p>SlateDB keeps the durable database in object storage. Rockbee readers open that shared data and build their own working caches. SQL adds a separate Parquet representation.</p></div>
+      <div class="storage-grid">
+        <div class="storage-layers"><div class="storage-layer"><span class="layer-num">A</span><div><h3>The authoritative KV store</h3><p>SlateDB manages WAL files, sorted string tables, and metadata. The writer waits for durability before a successful mutation acknowledgement.</p><span class="layer-tag">OPAQUE BYTES + JSON DOCUMENTS</span></div></div><div class="storage-layer"><span class="layer-num">B</span><div><h3>The derived SQL view</h3><p>The writer’s exporter turns a snapshot and later WAL changes into immutable Parquet. Manifests tell readers which files form a published table.</p><span class="layer-tag">PARQUET SEGMENTS + MANIFESTS</span></div></div><div class="storage-layer"><span class="layer-num">C</span><div><h3>The disposable working set</h3><p>Each process has SlateDB caches. Each SQL reader also caches Parquet in local temporary files. Replacing a reader loses warmth, not authoritative data.</p><span class="layer-tag">MEMORY CACHE + LOCAL QUERY FILES</span></div></div></div>
+        <div class="scale-box"><div class="card-top"><span>ADD READER COMPUTE</span><span>ILLUSTRATION</span></div><h3>More read traffic?<br>Add reader compute.</h3><label for="reader-count">Reader processes <output id="reader-output" for="reader-count">2</output></label><input id="reader-count" type="range" min="1" max="6" value="2" aria-describedby="scale-note"><div class="reader-pool" id="reader-pool"><span data-reader-index="1">R1<small>cache</small></span><span data-reader-index="2">R2<small>cache</small></span><span data-reader-index="3" hidden>R3<small>cache</small></span><span data-reader-index="4" hidden>R4<small>cache</small></span><span data-reader-index="5" hidden>R5<small>cache</small></span><span data-reader-index="6" hidden>R6<small>cache</small></span></div><div class="shared-store"><span aria-hidden="true">↕</span><strong>One shared object store</strong><span class="mono">One writer per prefix</span></div><p id="scale-note">Extra readers add serving resources and cache capacity. Capacity gains depend on the workload and shared bottlenecks.</p></div>
+      </div>
+      <div class="storage-takeaway"><strong>What this buys you</strong><p>Reader capacity can grow without provisioning a complete durable database copy per reader. You still pay for compute, caches, object requests, transfers, and cold-start work. Operators provision the readers; the system does not automatically scale them.</p></div>
+    </section>
+
+    <section class="comparison-section" id="compare" aria-labelledby="compare-title"><div class="wrap chapter">
+      <p class="eyebrow">04 / WHERE OTHER DESIGNS GET EXPENSIVE</p>
+      <div class="section-heading"><h2 id="compare-title">Every database<br><em>sends you a bill.</em></h2><p>Sometimes it is RAM. Sometimes it is replica storage, rebalancing, or operational work. The useful question is which tradeoff your application can afford.</p></div>
+      <div class="compare-tabs button-group" role="group" aria-label="Choose a database comparison"><button type="button" data-compare="redis" aria-pressed="true">Redis OSS</button><button type="button" data-compare="couchbase" aria-pressed="false">Couchbase Server</button><button type="button" data-compare="postgres" aria-pressed="false">PostgreSQL</button></div>
+      <article class="compare-panel" data-comparison="redis" aria-labelledby="redis-title">
+        <div class="comparison-heading"><div><h3 id="redis-title">Redis OSS</h3><p class="compare-scope">Self-managed Redis Open Source with RDB / AOF persistence. Redis Cloud and Redis Software have different operating models.</p></div><p>RAM is a great place for a hot working set. Keeping an entire growing dataset there changes the economics.</p></div>
+        <div class="comparison-columns"><div><h4>WHERE IT CAN HURT</h4><ol class="pain-list"><li><strong>Memory is a capacity decision.</strong> Keys, values, and data-structure overhead consume RAM. Redis recommends provisioning for peak memory; persistence does not turn the live dataset into an object-store working set.</li><li><strong>Durability has knobs.</strong> RDB snapshots can lose changes since the last snapshot. AOF improves recovery freshness, with log growth, rewrites, and replay to manage.</li><li><strong>Background work still costs resources.</strong> Snapshotting and AOF rewriting use fork and copy-on-write. Large, write-heavy datasets need memory headroom and latency monitoring.</li></ol></div><div class="strengths"><h4>WHY YOU MIGHT STILL CHOOSE IT</h4><ul><li>Rich in-memory data structures for counters, queues, sets, and hot application state.</li><li>Real persistence options: RDB, AOF, or both. Redis is much more than a disposable cache.</li></ul></div></div>
+        <div class="rockbee-tradeoff"><h4>What Rockbee changes</h4><p>Durable data lives in shared object storage; readers cache their working sets. The cost is eventual reader visibility and cold object fetches. Rockbee does not provide Redis’s data structures or promise its in-memory latency.</p></div>
+        <div class="compare-sources"><a href="https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/memory-optimization/">Redis: memory allocation ↗</a><a href="https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/">Redis: persistence tradeoffs ↗</a></div>
+      </article>
+      <article class="compare-panel" data-comparison="couchbase" aria-labelledby="couchbase-title">
+        <div class="comparison-heading"><div><h3 id="couchbase-title">Couchbase Server</h3><p class="compare-scope">Self-managed Couchbase Server, including Enterprise Magma. Capella and other managed Couchbase offerings are separate comparisons.</p></div><p>A broad distributed database gives you more capabilities—and more service placement and capacity decisions.</p></div>
+        <div class="comparison-columns"><div><h4>WHERE IT CAN HURT</h4><ol class="pain-list"><li><strong>The service topology is yours to manage.</strong> Data, Query, Index, Search, and other services have their own placement and resource needs. A SQL++ query can involve several roles.</li><li><strong>Growth can involve rebalancing.</strong> Adding or removing nodes and changing service placement can redistribute data and indexes. Capacity changes are cluster operations to plan and monitor.</li><li><strong>Disk-oriented still needs sizing.</strong> Magma supports datasets larger than memory, but storage hardware, memory quotas, flushing, and compaction remain part of the operating model.</li></ol></div><div class="strengths"><h4>WHY YOU MIGHT STILL CHOOSE IT</h4><ul><li>Multi-Dimensional Scaling already separates services so Data, Query, Index, and Search can scale independently.</li><li>SQL++, indexing, search, and a disk-oriented storage engine provide a broader document-database toolkit.</li></ul></div></div>
+        <div class="rockbee-tradeoff"><h4>What Rockbee changes</h4><p>A smaller topology: one writer, independent readers, and shared durable objects. You give up Couchbase’s broader indexing and service ecosystem. Rockbee’s SELECT-over-Parquet path is a different query contract.</p></div>
+        <div class="compare-sources"><a href="https://docs.couchbase.com/server/current/learn/services-and-indexes/services/services.html">Couchbase: services &amp; MDS ↗</a><a href="https://docs.couchbase.com/server/current/learn/buckets-memory-and-storage/storage-engines.html">Couchbase: Magma ↗</a><a href="https://docs.couchbase.com/server/current/cli/cbcli/couchbase-cli-rebalance.html">Couchbase: rebalance ↗</a></div>
+      </article>
+      <article class="compare-panel" data-comparison="postgres" aria-labelledby="postgres-title">
+        <div class="comparison-heading"><div><h3 id="postgres-title">PostgreSQL</h3><p class="compare-scope">PostgreSQL 18 with conventional physical primary / standby replication. Managed services and shared-storage variants can differ.</p></div><p>Read replicas bring more serving capacity. They also bring database copies, WAL replay, and another recovery path.</p></div>
+        <div class="comparison-columns"><div><h4>WHERE IT CAN HURT</h4><ol class="pain-list"><li><strong>A physical standby starts from a database copy.</strong> Each maintains its own data directory and applies the primary’s WAL. More replicas mean more storage and replay work.</li><li><strong>Lag and durability are explicit choices.</strong> Asynchronous replicas can lag and lose recent commits on failover. Synchronous replication waits for selected standbys and adds commit latency.</li><li><strong>WAL retention needs attention.</strong> Slots protect lagging replicas, but retained WAL can fill storage. A replica that falls behind available history can require a new base backup.</li></ol></div><div class="strengths"><h4>WHY YOU MIGHT STILL CHOOSE IT</h4><ul><li>ACID transactions, constraints, indexes, joins, and a mature relational SQL ecosystem.</li><li>With configured synchronous standbys, <code>synchronous_commit = remote_apply</code> waits until changes are applied and visible there.</li></ul></div></div>
+        <div class="rockbee-tradeoff"><h4>What Rockbee changes</h4><p>Readers use shared durable objects instead of maintaining a complete durable replica. Rockbee trades away multi-key transactions, immediate reader freshness, and automatic writer failover. A transactional system of record may still belong in PostgreSQL.</p></div>
+        <div class="compare-sources"><a href="https://www.postgresql.org/docs/18/warm-standby.html">PostgreSQL: physical &amp; synchronous replication ↗</a><a href="https://www.postgresql.org/docs/18/high-availability.html">PostgreSQL: availability choices ↗</a><a href="https://www.postgresql.org/docs/18/tutorial-transactions.html">PostgreSQL: transactions ↗</a><a href="https://www.postgresql.org/docs/18/runtime-config-wal.html">PostgreSQL: commit settings ↗</a></div>
+      </article>
+      <div class="comparison-close"><strong>Rockbee’s bet: durable data belongs in shared storage.</strong><p>Choose it when byte-key lookups, flexible JSON, and an eventually published SQL view fit the workload. A single writer, eventual reads, and bounded single-table queries are part of that choice. Checkout transactions and strict read-after-write requirements call for a different contract.</p></div>
+      <p class="source-caption">Architecture comparison, reviewed 18 October 2026. Product scopes and official documentation are linked above. These are qualitative tradeoffs, not a performance benchmark or a price comparison.</p>
+    </div></section>
+
+    <section class="chapter wrap" id="internals" aria-labelledby="internals-title">
+      <p class="eyebrow">05 / UNDER THE HOOD</p>
+      <div class="section-heading"><h2 id="internals-title">Open the details.<br><em>Follow the code.</em></h2><p>The API, protocol, storage layout, publication rules, and failure paths. Implementation links are pinned to the revision reviewed for this guide.</p></div>
+      <div class="technical-layout"><aside class="technical-aside"><p class="eyebrow">THE SOURCE OF TRUTH</p><h3>Rust services.<br>Embedded engines.</h3><p>Rockbee is written in Rust. SlateDB owns durable KV storage. The Rust DuckDB crate embeds the native DuckDB engine for Parquet export and SQL.</p><p>DuckDB is an embedded library in the writer and reader processes; there is no separate DuckDB server.</p><a class="text-link" href="https://github.com/umit/rockbee/tree/85d093fc80069f3ea2fce195d87f89d73e10d902">Browse this revision ↗</a><div class="mini-contract"><span>SDK</span><strong>RockBeeClient</strong><span>TRANSPORT</span><strong>TCP + Protobuf</strong><span>KV ENGINE</span><strong>SlateDB</strong><span>SQL ENGINE</span><strong>DuckDB</strong><span>SQL FORMAT</span><strong>Apache Parquet</strong></div></aside>
+      <div class="deep-sections">
+        <details class="deep-detail" open><summary>The public client: KV by default, tables when you need them</summary><p><code>RockBeeClient</code> exposes <code>put</code>, <code>get</code>, and <code>delete</code> for nonempty opaque byte keys and values. User keys are limited to 65,534 bytes; the complete wire frame must also fit its 1 MiB bound. <code>client.table("products")</code> creates a JSON-table handle sharing the same connection, admission limits, and shutdown lifecycle. It uses composition, not inheritance.</p><pre><code class="language-rust">use rockbee_client::RockBeeClient;
+use serde_json::json;
+
+let client = RockBeeClient::connect("127.0.0.1:7100").await?;
+
+// Byte values: the application chooses the encoding.
+client.put(b"cart:customer-42", b"product-42:2", None).await?;
+let cart = client.get(b"cart:customer-42").await?;
+
+// JSON table: generate a UUID, or choose your own ID.
+let products = client.table("products");
+let id = products.put(&amp;json!({
+    "name": "Trail Backpack", "price": 79
+})).await?;
+let product = products.get(&amp;id).await?;
+// Either GET can lag a preceding durable PUT.</code></pre><p><code>put_key(id, document, ttl)</code> replaces a document under a supplied ID. JSON objects can have different fields. Raw keys and table IDs live in separate physical namespaces.</p><p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-client/src/kv.rs">KV API</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-client/src/table.rs">Table API</a></p></details>
+        <details class="deep-detail"><summary>What a successful PUT means, and what a lost reply means</summary><p>A PUT starts eagerly and returns a completion handle. Dropping an admitted handle does not cancel the write. Awaiting success confirms that the writer acknowledged SlateDB durability. Shutdown drains admitted operations, including dropped handles, before disconnecting.</p><table><thead><tr><th scope="col">Outcome</th><th scope="col">What the application knows</th></tr></thead><tbody><tr><td><code>NotSent</code></td><td>The client did not enqueue the request.</td></tr><tr><td><code>Rejected</code></td><td>A server response confirms the mutation was not applied.</td></tr><tr><td><code>Unknown</code></td><td>The mutation may have become durable. A lost reply cannot settle that question.</td></tr></tbody></table><p>The client and gateway do not automatically replay uncertain mutations. Request IDs correlate responses on a connection; they are not durable deduplication keys. By default, client clones share 128 active and 128 pending slots, with a 5-second end-to-end request deadline.</p><p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-client/README.md#L31-L42">Client contract</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-protocol/src/mutation.rs">Mutation outcomes</a></p></details>
+        <details class="deep-detail"><summary>On the wire: Protobuf messages over bounded TCP connections</summary><p><code>proto/rockbee.proto</code> defines the versioned envelope, requests, responses, and correlation IDs. Prost generates Rust types; the generated file is checked into the repository and included by the protocol crate. Ordinary Cargo builds use that file. Regeneration is an explicit developer command.</p><pre data-no-highlight><code>4-byte big-endian length | Protobuf Envelope
+                          version = 1
+                          request_id = positive integer
+                          oneof: KV / Table / Status / Response
+
+Maximum frame: 1 MiB, including the length prefix.</code></pre><p>This is a custom TCP protocol. Multiplexed requests use positive IDs; zero is reserved for sequential mode. The shared RPC layer bounds connections and in-flight work. Its frame read/write timeouts are separate from client and query execution deadlines.</p><pre><code class="language-bash">cargo run -p rockbee-protocol --example generate_protocol</code></pre><p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/proto/rockbee.proto">Wire schema</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-protocol/examples/generate_protocol.rs">Code generation</a></p></details>
+        <details class="deep-detail"><summary>Gateway routing, reader refresh, and caches</summary><p>Validated mutations take the one writer route exactly once. GET and SQL requests go to readers in round-robin order, with reader failover inside one routing budget. A successful missing-value response is final; the gateway does not ask another reader to search for a newer value.</p><p>Readers use SlateDB’s read-only <code>DbReader</code>, replay WAL data, and refresh their view. The checked-in poll interval is 10 seconds. That is a polling setting, not a visibility guarantee. Lower intervals trade extra object-store requests for more frequent refresh.</p><p>The gateway has no separate KV cache. Each writer or reader has SlateDB block and metadata caches; SQL adds a reader-local Parquet file cache. Cold requests can fetch durable objects, while warm requests may use the working set already present.</p><p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/apps/rockbee-gateway/src/router.rs">Router</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/apps/rockbee-reader/src/lib.rs">Reader</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/configs/reader.toml">Reader configuration</a></p></details>
+<details class="deep-detail">
+  <summary>A table is a separate JSON namespace, not a different database</summary>
+  <p>Rockbee keeps opaque byte keys and JSON tables in the same SlateDB database, under disjoint physical key prefixes. A table name is an ASCII identifier of 1–64 bytes; a document ID is UTF-8 and may be up to 1,024 bytes. A table value must be a JSON object. A table <code>PUT</code> writes the document and a durable catalogue entry in one SlateDB batch, so the exporter can discover the table after a restart.</p>
+  <pre data-no-highlight><code>raw key       = [0, ...]
+table prefix  = [1, table_name_length, ...table_name_bytes]
+catalogue key = [2, ...table_name_bytes]</code></pre>
+  <p>Export objects are deliberately outside the SlateDB data paths. The table name is hex encoded, preserving distinct case-sensitive names even when the object store is a local filesystem.</p>
+  <pre><code class="language-text">&lt;prefix&gt;/_rockbee_tables/&lt;hex-table-name&gt;/
+  segments/&lt;uuid&gt;.parquet
+  manifests/&lt;20-digit-revision&gt;.json</code></pre>
+  <p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-protocol/src/table.rs#L6-L10">table limits</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-protocol/src/table.rs#L120-L152">table key encoding</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/apps/rockbee-writer/src/lib.rs#L148-L178">durable table PUT</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/exporter.rs#L45-L66">object layout</a></p>
+</details>
+
+<details class="deep-detail">
+  <summary>Export starts with a pinned snapshot, then follows the WAL</summary>
+  <p>A writer-owned background worker checks registered tables every 500 ms. A table’s first export, a compaction, or a detected WAL gap builds a new base generation. This work is independent of the mutation acknowledgement: the client receives success only after SlateDB durability, not after Parquet publication.</p>
+  <ol>
+    <li>Flush the writer memtable and create a detached SlateDB checkpoint with a 24-hour lease.</li>
+    <li>Scan that pinned checkpoint for the current rows of one table, writing bounded Parquet batches.</li>
+    <li>Record the checkpoint’s WAL high-water mark, then consume the committed WAL tail through EOF.</li>
+    <li>Publish the complete generation only after all of its segments exist.</li>
+  </ol>
+  <table>
+    <thead><tr><th scope="col">Export bound</th><th scope="col">Value</th></tr></thead>
+    <tbody>
+      <tr><td>Batch before encoding</td><td>1,000 rows or approximately 8 MiB</td></tr>
+      <tr><td>Encoded Parquet segment</td><td>32 MiB maximum</td></tr>
+      <tr><td>Snapshot checkpoint lease</td><td>24 hours</td></tr>
+    </tbody>
+  </table>
+  <p>The manifest cursor is <code>exported_wal_file_id</code>. It advances only after a whole WAL file has reached EOF; uploaded partial batches are not made visible on their own. A missing/truncated WAL causes a fresh pinned snapshot rather than skipping history.</p>
+  <p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/exporter.rs#L17-L22">export constants</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/exporter.rs#L130-L178">worker lifecycle</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/exporter.rs#L276-L361">snapshot and tail reconciliation</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/exporter.rs#L364-L427">WAL cursor rule</a></p>
+</details>
+
+<details class="deep-detail">
+  <summary>Immutable segments become visible through a manifest revision</summary>
+  <p>Each Parquet row contains the document ID and JSON value plus the ordering and visibility metadata needed to reconstruct current table state: <code>seq</code>, absolute expiry, tombstone, WAL file ID, and row ordinal. Segment writes use create-only object-store operations. Only afterwards can the worker publish a new create-only manifest revision.</p>
+  <div class="example-label">ILLUSTRATIVE MANIFEST EXCERPT · OTHER FIELDS OMITTED</div>
+  <pre><code class="language-json">{
+  "format_version": 1,
+  "revision": 42,
+  "writer_epoch": 9,
+  "exported_wal_file_id": 1234,
+  "segments": [{ "path": "…/segments/uuid.parquet", "bytes": 1048576 }]
+}</code></pre>
+  <p>Publication checks the active SlateDB writer epoch, requires the expected preceding revision, and rejects a cursor that would regress. The result is a complete immutable generation or the preceding published generation; a failed upload or publication does not make partial state queryable.</p>
+  <p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/exporter.rs#L24-L43">manifest schema</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/exporter.rs#L430-L506">segment upload and publication</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/exporter.rs#L219-L239">writer-epoch fence</a></p>
+</details>
+
+<details class="deep-detail">
+  <summary>SQL reads local cached Parquet, then reconstructs the latest document</summary>
+  <p>A reader reloads the table manifest for every SQL query. It checks that every referenced segment stays inside that table’s object prefix, downloads any cache miss into a reader-owned temporary directory, verifies its manifest size, and gives DuckDB those local file paths. DuckDB does not directly read S3 or SlateDB for a query.</p>
+  <p>Before your SQL predicates run, Rockbee builds the selected table view by selecting the newest row for each <code>id</code>. The ordering is exact:</p>
+  <pre><code class="language-sql">row_number() OVER (
+  PARTITION BY id
+  ORDER BY seq DESC, wal_file_id DESC, row_ordinal DESC
+)</code></pre>
+  <p>Only rank 1 remains; then its tombstone and expiry are evaluated. This ordering matters: an older live value cannot reappear when the newest record is a delete or has expired.</p>
+  <p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/reader.rs#L80-L141">manifest reload and execution</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/reader.rs#L213-L288">local download cache</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/reader.rs#L320-L336">deduplication and visibility view</a></p>
+</details>
+
+<details class="deep-detail">
+  <summary>Deletes and TTL use the same newest-record rule</summary>
+  <p>A table delete is a durable SlateDB tombstone. The exporter preserves it as a Parquet row with <code>tombstone: true</code>; queries remove it only after deciding that it is the newest row for that ID. This keeps a historical pre-delete value from resurfacing.</p>
+  <p>TTL is stored as an absolute Unix-millisecond expiry. <code>ttl_millis = 0</code> means no expiry. At the exact expiry instant a point read is invisible, and query SQL uses the equivalent condition <code>expires_at_unix_ms &gt; now</code>. A later non-expiring PUT replaces an earlier expiry because it is the newest record.</p>
+  <pre><code class="language-rust">ttl_millis == 0  // Ttl::NoExpiry
+ttl_millis &gt; 0   // Ttl::ExpireAtMillis(now + ttl_millis)</code></pre>
+  <p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/apps/rockbee-writer/src/lib.rs#L155-L190">table TTL and delete durability</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-runtime/src/ttl.rs#L15-L34">wall-clock TTL semantics</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/exporter.rs#L401-L418">tombstone export</a></p>
+</details>
+
+<details class="deep-detail">
+  <summary>Query execution is deliberately bounded and single-table</summary>
+  <p>Each query gets an in-memory DuckDB connection and a private spill directory. External access, persistent secrets, and extension auto-loading are disabled. SQL must be one <code>SELECT</code>; DuckDB parses it into a syntax tree, and Rockbee permits only the selected unqualified table and lexical CTEs. Expressions, joins over CTEs, and aggregates still run in DuckDB. Allowed table functions are <code>range</code>, <code>generate_series</code>, <code>unnest</code>, <code>json_each</code>, and <code>json_tree</code>; file scans, other tables, and catalogue access are rejected.</p>
+  <table>
+    <thead><tr><th scope="col">Per reader / per query</th><th scope="col">Default bound</th></tr></thead>
+    <tbody>
+      <tr><td>SQL text</td><td>64 KiB</td></tr>
+      <tr><td>Concurrent SQL workers</td><td>2; excess returns busy</td></tr>
+      <tr><td>Whole deadline, including downloads</td><td>4 seconds</td></tr>
+      <tr><td>DuckDB memory / spill</td><td>256 MB / 1 GiB</td></tr>
+      <tr><td>Result</td><td>1,000 rows and 512 KiB JSON</td></tr>
+      <tr><td>Local Parquet cache</td><td>8 GiB, 16,384 files, 32 MiB/object</td></tr>
+    </tbody>
+  </table>
+  <p>The reader configuration can change timeout, DuckDB memory (1–16,384 MB), and concurrency (1–128). It does not make query state durable or turn the cache into an authority.</p>
+  <p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/reader.rs#L14-L71">reader defaults and configurable limits</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/reader.rs#L307-L372">DuckDB isolation and result bounds</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/sql.rs#L10-L146">SQL source restrictions</a></p>
+</details>
+
+<details class="deep-detail">
+  <summary>Recovery favors a known published generation over a speculative one</summary>
+  <p>On writer restart, Rockbee detects registered tables and restarts export even without another mutation. The exporter retries transient object-store failures, but a newer SlateDB writer epoch fences the old exporter. On normal shutdown it cancels and joins the exporter before closing the database; owned checkpoint cleanup is attempted on completion, failure, and cancellation.</p>
+  <p>Compaction creates a new snapshot generation after at least 128 delta segments and 60 seconds. It replaces what the current manifest references, preserving the same visibility rules. Manifest revisions and unreferenced Parquet objects are currently retained; automatic garbage collection is not implemented.</p>
+  <p>SQL is eventually consistent with durable writes. A registered table with no first manifest returns a warming error. A lagging reader may not yet see the catalogue entry and can treat the table as empty. The returned <code>exported_wal_file_id</code> describes the export generation used; it is not a write receipt or a cross-reader read barrier.</p>
+  <p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/apps/rockbee-writer/src/lib.rs#L45-L64">restart resumes export</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/apps/rockbee-writer/src/lib.rs#L197-L215">writer shutdown</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/exporter.rs#L242-L273">compaction and WAL-gap recovery</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/src/reader.rs#L92-L96">warming behavior</a></p>
+</details>
+
+        <details class="deep-detail"><summary>What SQL returns to the application</summary><p>The selected table exposes <code>id VARCHAR</code> and <code>value JSON</code>. Your SELECT shapes each result row. SQL reads the published projection, so this example result applies after the product is visible in that generation.</p><pre><code class="language-rust">let result = products.query(
+    "SELECT id, value-&gt;&gt;'name' AS name,
+            TRY_CAST(value-&gt;&gt;'price' AS DOUBLE) AS price
+     FROM products
+     WHERE TRY_CAST(value-&gt;&gt;'price' AS DOUBLE) &lt; 100
+     ORDER BY price"
+).await?;
+
+for row in result.rows {
+    println!("{row}");
+}</code></pre><div class="example-label">EXAMPLE ROW · AFTER PUBLICATION</div><pre><code class="language-json">{"id":"product-42","name":"Trail Backpack","price":79.0}</code></pre><p>The client returns JSON row values plus <code>exported_wal_file_id</code>. Results are bounded and materialized; this API does not return a streaming database cursor. The watermark describes the exported view, not confirmation that a particular recent write is present.</p><p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-client/src/table.rs">Query client</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-protocol/src/table.rs">Result representation</a></p></details>
+        <details class="deep-detail"><summary>Configuration: storage, serving bounds, and SQL resources</summary><p>Writer and reader processes share the same backend, bucket or directory, and prefix. Current backend constructors cover S3, LocalStack, and local files. Native GCS and Azure backend configuration is not implemented. The gateway is configured with one writer and a list of readers.</p><pre><code class="language-toml"># Reader-side SQL configuration
+[query]
+timeout_ms = 4000
+memory_limit_mb = 256
+max_concurrent = 2
+
+[reader]
+poll_interval_ms = 10000</code></pre><table><thead><tr><th scope="col">Checked-in setting</th><th scope="col">Value</th></tr></thead><tbody><tr><td>RPC connections / global in-flight</td><td>256 / 128 per process</td></tr><tr><td>RPC frame read / write timeout</td><td>30 s / 5 s</td></tr><tr><td>SlateDB block / metadata cache</td><td>512 MiB / 128 MiB per process</td></tr><tr><td>Reader replay memtable maximum</td><td>64 MiB per memtable</td></tr><tr><td>Writer unflushed-data backpressure</td><td>1 GiB</td></tr></tbody></table><p>Cache capacities are not preallocated memory or total process RSS ceilings. Query memory is a DuckDB setting per query; concurrent queries and other process work consume additional resources.</p><p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/configs/reader.toml">Reader config</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/configs/writer.toml">Writer config</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-runtime/src/backend.rs">Backend construction</a></p></details>
+        <details class="deep-detail"><summary>CDC, restarts, and operating the processes</summary><p><code>rockbee-cdc</code> tails durable SlateDB WAL changes into JSON lines. It flushes output before advancing a locked, source-bound cursor. Crashes may repeat events, so consumers need at-least-once handling. TTL expiry does not emit a delete event; engine-private table and catalogue keys are filtered from this raw KV stream.</p><p><code>make local</code> starts an owned writer, reader, and gateway on dynamic ports with a unique storage prefix. It prints connection details. Fixed development configs use gateway 7100, writer 7101, and reader 7102. Start the writer before the reader.</p><p><code>--check-config</code> reports effective configuration without proving connectivity. A status probe reports endpoint role and local RPC counters; it does not prove storage health or reader freshness.</p><p>Reader request failover is implemented. Automatic writer failover and write sharding are not. The public transport is plain TCP without built-in authentication or TLS; deployments must supply the required network boundary. SQL path restrictions are not a tenant-authentication system.</p><p><a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/tools/rockbee-cdc/README.md">CDC contract</a> · <a class="source-link" href="https://github.com/umit/rockbee/blob/85d093fc80069f3ea2fce195d87f89d73e10d902/DEVELOPMENT.md">Development &amp; operations</a></p></details>
+        <details class="deep-detail"><summary>The module map and the evidence behind this guide</summary><table><thead><tr><th scope="col">Module</th><th scope="col">Owns</th></tr></thead><tbody><tr><td><code>rockbee-client</code></td><td>Public Rust API, eager completion handles, admission lifecycle</td></tr><tr><td><code>rockbee-protocol</code></td><td>Protobuf types, framing, validation, mutation certainty</td></tr><tr><td><code>rockbee-rpc</code></td><td>Bounded TCP server and response handling</td></tr><tr><td><code>rockbee-runtime</code></td><td>Backend construction, shared config and memory settings</td></tr><tr><td><code>rockbee-query</code></td><td>Writer export, manifest publication, reader SQL</td></tr><tr><td><code>rockbee-gateway / writer / reader</code></td><td>Separately runnable serving processes</td></tr><tr><td><code>rockbee-cli / cdc</code></td><td>Local workflow, requests, probes, WAL consumption</td></tr></tbody></table><p>The repository contains durability, lost-acknowledgement, reader convergence, SQL update/delete/expiry, and publication recovery tests. Local fixtures establish those behaviors under their test conditions; they do not establish production throughput or linear scaling.</p><p><a class="source-link" href="https://github.com/umit/rockbee/tree/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-test-support/tests">Storage behavior tests</a> · <a class="source-link" href="https://github.com/umit/rockbee/tree/85d093fc80069f3ea2fce195d87f89d73e10d902/crates/rockbee-query/tests">Query tests</a> · <a class="source-link" href="https://github.com/umit/rockbee/tree/85d093fc80069f3ea2fce195d87f89d73e10d902/apps/rockbee-gateway/tests">Gateway failure tests</a></p></details>
+      </div></div>
+    </section>
+    <section class="closing wrap"><p class="eyebrow">NOW YOU KNOW THE PATH</p><h2>Start small.<br><em>Keep the architecture clear.</em></h2><div><a class="primary-button" href="./#try-it">Run Rockbee locally ↗</a><a class="text-link" href="https://github.com/umit/rockbee">Read the source ↗</a></div></section>
+  </main>
+  <footer class="site-footer wrap"><a class="brand" href="./" aria-label="Rockbee home"><svg viewBox="120 145 1810 445" aria-hidden="true"><image href="assets/rockbee-logo-transparent.png" width="2007" height="784"/></svg></a><p>Built in Rust on SlateDB. SQL by DuckDB.</p><a href="#main">Back to top ↑</a></footer>
+</body>
+</html>
