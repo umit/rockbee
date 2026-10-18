@@ -61,6 +61,17 @@ impl RockBeeClient {
         })
     }
 
+    /// Read the opaque byte value for `key`; the gateway serves this through a reader.
+    ///
+    /// This is the key-value API: keys and values are arbitrary nonempty bytes,
+    /// and a missing or expired key returns `Ok(None)`. It differs from
+    /// [`Table::get`](crate::Table::get), which addresses a named JSON table by
+    /// string ID and decodes a JSON object. Reader replication is eventual, so
+    /// a successful PUT or DELETE is not necessarily visible to this call yet.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid key, a closed or overloaded client,
+    /// a deadline/transport failure, or a server error.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         if key.is_empty() {
             return Err("key must not be empty".into());
@@ -78,7 +89,8 @@ impl RockBeeClient {
     ///
     /// A timeout or server-side storage error can leave the deletion's outcome
     /// unknown. An error does not guarantee the value remains present, and the
-    /// client does not automatically retry the mutation.
+    /// client does not automatically retry the mutation. As with [`Self::put`],
+    /// a later reader GET can lag the durable writer acknowledgement.
     pub async fn delete(&self, key: &[u8]) -> MutationResult {
         if key.is_empty() {
             return Err(MutationError::new(

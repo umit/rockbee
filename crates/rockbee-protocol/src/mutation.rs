@@ -5,7 +5,7 @@ use std::{error::Error, fmt};
 
 type Cause = Box<dyn Error + Send + Sync>;
 
-/// What the caller can establish about this particular failed PUT or DELETE.
+/// What the caller can establish about this particular failed KV or table mutation.
 /// None of these variants is an instruction to retry automatically.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,9 +27,12 @@ pub struct MutationError {
     cause: Cause,
 }
 
+/// Mutation result preserving whether a failed request was unsent, rejected, or uncertain.
+/// Successful client mutation results acknowledge writer durability, not reader freshness.
 pub type MutationResult<T = ()> = Result<T, MutationError>;
 
 impl MutationError {
+    /// Associates a diagnostic cause with the certainty known at this boundary.
     pub fn new(outcome: MutationOutcome, cause: impl Into<Cause>) -> Self {
         Self {
             outcome,
@@ -37,6 +40,7 @@ impl MutationError {
         }
     }
 
+    /// Returns machine-readable certainty; the diagnostic cause is available through `Error::source`.
     pub fn outcome(&self) -> MutationOutcome {
         self.outcome
     }

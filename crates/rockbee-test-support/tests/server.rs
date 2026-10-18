@@ -287,10 +287,20 @@ async fn malformed_or_wrong_direction_frames_do_not_write_over_tcp() -> Result<(
 }
 
 #[tokio::test]
-async fn reader_endpoint_rejects_put_and_delete_over_tcp() -> Result<()> {
+async fn reader_endpoint_rejects_all_mutations_over_tcp() -> Result<()> {
+    use rockbee_protocol::table::TableRequest;
+
     let objects = Arc::new(InMemory::new());
     let writer = Store::open(Role::Writer, "read-only-routing", objects.clone()).await?;
     writer.put(b"name", b"original").await?;
+    writer
+        .table(&TableRequest::Put {
+            table: "products".into(),
+            id: "42".into(),
+            value: br#"{"stock":7}"#.to_vec(),
+            ttl_millis: 0,
+        })
+        .await?;
     let reader = Store::open(Role::Reader, "read-only-routing", objects).await?;
     let (address, stop, task) = start_server(reader).await?;
     for request_value in [
@@ -301,15 +311,44 @@ async fn reader_endpoint_rejects_put_and_delete_over_tcp() -> Result<()> {
         Request::Delete {
             key: b"name".to_vec(),
         },
+        Request::PutWithTtl {
+            key: b"name".to_vec(),
+            value: b"changed".to_vec(),
+            ttl_millis: 1,
+        },
+        Request::Table(TableRequest::Put {
+            table: "products".into(),
+            id: "42".into(),
+            value: b"{}".to_vec(),
+            ttl_millis: 0,
+        }),
+        Request::Table(TableRequest::Delete {
+            table: "products".into(),
+            id: "42".into(),
+        }),
     ] {
         assert!(matches!(
             request(&address, request_value).await?,
-            Response::Error { .. }
+            Response::Error {
+                mutation_outcome: MutationOutcome::Rejected,
+                ..
+            }
         ));
     }
     assert_eq!(
         writer.get(b"name").await?.as_deref(),
         Some(&b"original"[..])
+    );
+    assert_eq!(
+        writer
+            .table(&TableRequest::Get {
+                table: "products".into(),
+                id: "42".into()
+            })
+            .await?,
+        Response::Value {
+            value: Some(br#"{"stock":7}"#.to_vec())
+        }
     );
     stop.send(()).expect("server is running");
     task.await??;
@@ -330,13 +369,23 @@ impl WireMessage for UncheckedRequest {
 }
 
 #[tokio::test]
-async fn raw_empty_inputs_are_rejected_by_both_nodes_without_changing_stored_data() -> Result<()> {
+async fn raw_invalid_inputs_are_rejected_by_both_nodes_without_changing_stored_data() -> Result<()>
+{
+    use rockbee_protocol::table::TableRequest;
     use std::time::Duration;
 
     for role in [Role::Writer, Role::Reader] {
         let objects = Arc::new(InMemory::new());
         let writer = Store::open(Role::Writer, "raw-empty-input", objects.clone()).await?;
         writer.put(b"\0", b"original").await?;
+        writer
+            .table(&TableRequest::Put {
+                table: "products".into(),
+                id: "42".into(),
+                value: br#"{"stock":7}"#.to_vec(),
+                ttl_millis: 0,
+            })
+            .await?;
         let store = match role {
             Role::Writer => writer,
             Role::Reader => {
@@ -372,7 +421,52 @@ async fn raw_empty_inputs_are_rejected_by_both_nodes_without_changing_stored_dat
                     },
                     Request::Get { key: vec![] },
                     Request::Delete { key: vec![] },
+                    Request::Table(TableRequest::Put {
+                        table: "bad.table".into(),
+                        id: "42".into(),
+                        value: b"{}".to_vec(),
+                        ttl_millis: 0,
+                    }),
+                    Request::Table(TableRequest::Put {
+                        table: "products".into(),
+                        id: "".into(),
+                        value: b"{}".to_vec(),
+                        ttl_millis: 0,
+                    }),
+                    Request::Table(TableRequest::Put {
+                        table: "products".into(),
+                        id: "42".into(),
+                        value: b"[]".to_vec(),
+                        ttl_millis: 0,
+                    }),
+                    Request::Table(TableRequest::Put {
+                        table: "products".into(),
+                        id: "42".into(),
+                        value: b"{}".to_vec(),
+                        ttl_millis: u64::MAX,
+                    }),
+                    Request::Table(TableRequest::Delete {
+                        table: "bad.table".into(),
+                        id: "42".into(),
+                    }),
+                    Request::Table(TableRequest::Delete {
+                        table: "products".into(),
+                        id: "".into(),
+                    }),
+                    Request::Table(TableRequest::Get {
+                        table: "products".into(),
+                        id: "".into(),
+                    }),
+                    Request::Table(TableRequest::Query {
+                        table: "products".into(),
+                        sql: "".into(),
+                    }),
+                    Request::Table(TableRequest::Query {
+                        table: "bad.table".into(),
+                        sql: "SELECT 1".into(),
+                    }),
                 ];
+                let next_request_id = u64::try_from(invalid.len())? + 1;
                 for (index, request) in invalid.into_iter().enumerate() {
                     let request_id = if first_id == 0 {
                         0
@@ -380,6 +474,13 @@ async fn raw_empty_inputs_are_rejected_by_both_nodes_without_changing_stored_dat
                         u64::try_from(index)? + 1
                     };
                     let mutation = request.is_mutation();
+                    let query_validation = match &request {
+                        Request::Table(TableRequest::Query { sql, .. }) if sql.is_empty() => {
+                            Some("SQL must")
+                        }
+                        Request::Table(TableRequest::Query { .. }) => Some("table name must"),
+                        _ => None,
+                    };
                     write_frame(
                         &mut output,
                         &UncheckedRequest(RequestEnvelope {
@@ -394,16 +495,20 @@ async fn raw_empty_inputs_are_rejected_by_both_nodes_without_changing_stored_dat
                     let reply = ResponseEnvelope::decode(&frame)?;
                     assert_eq!(reply.request_id, request_id);
                     let Response::Error {
-                        mutation_outcome, ..
+                        message,
+                        mutation_outcome,
                     } = reply.response
                     else {
-                        return Err(format!("{role:?} accepted empty input").into());
+                        return Err(format!("{role:?} accepted invalid input").into());
                     };
                     if mutation {
                         assert_eq!(mutation_outcome, MutationOutcome::Rejected);
                     }
+                    if let Some(expected) = query_validation {
+                        assert!(message.contains(expected), "{role:?}: {message}");
+                    }
                 }
-                let request_id = if first_id == 0 { 0 } else { 7 };
+                let request_id = if first_id == 0 { 0 } else { next_request_id };
                 write_frame(
                     &mut output,
                     &RequestEnvelope {
@@ -421,6 +526,19 @@ async fn raw_empty_inputs_are_rejected_by_both_nodes_without_changing_stored_dat
                     reply.response,
                     Response::Value {
                         value: Some(b"original".to_vec())
+                    }
+                );
+                assert_eq!(
+                    request(
+                        &address,
+                        Request::Table(TableRequest::Get {
+                            table: "products".into(),
+                            id: "42".into(),
+                        })
+                    )
+                    .await?,
+                    Response::Value {
+                        value: Some(br#"{"stock":7}"#.to_vec())
                     }
                 );
             }

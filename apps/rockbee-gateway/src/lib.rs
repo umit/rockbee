@@ -12,12 +12,20 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+/// Stateless client-facing server that routes mutations to one writer and
+/// KV/document reads and SQL queries to independently configured readers.
+///
+/// Readers can lag durable writes. The gateway keeps no key/value cache; data
+/// caching belongs to SlateDB. Mutations are never automatically replayed.
 pub struct Gateway {
     rpc: RpcServer,
     router: Arc<Router>,
 }
 
 impl Gateway {
+    /// Reserves the listening address with default upstream and RPC limits.
+    /// Call [`Self::run`] or [`Self::run_until`] to start serving requests.
+    /// Binding validates topology but does not establish backend health.
     pub async fn bind(address: &str, writer: String, readers: Vec<String>) -> Result<Self> {
         Self::bind_with_config(
             address,
@@ -29,6 +37,8 @@ impl Gateway {
         .await
     }
 
+    /// Reserves the listener with explicit upstream deadlines and admission limits,
+    /// while retaining default limits for incoming client RPC connections.
     pub async fn bind_with_upstream(
         address: &str,
         writer: String,
@@ -38,6 +48,10 @@ impl Gateway {
         Self::bind_with_config(address, writer, readers, upstream, RpcConfig::default()).await
     }
 
+    /// Reserves the listener with separate limits for incoming RPC and backend requests.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid topology, invalid limits, or a bind failure.
     pub async fn bind_with_config(
         address: &str,
         writer: String,
@@ -54,9 +68,11 @@ impl Gateway {
         })
     }
 
+    /// Returns the actual listener address, including an OS-assigned port when bound to `:0`.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.rpc.local_addr()
     }
+    /// Serves requests until an OS shutdown signal and drains RPC work before exiting.
     pub async fn run(self) -> Result<()> {
         self.run_with_ready(|| {}).await
     }
@@ -69,6 +85,8 @@ impl Gateway {
         self.run_until(wait_for_shutdown(ready)).await
     }
 
+    /// Serves until the supplied shutdown future completes, then drains RPC work.
+    /// This owns the gateway listener, not the separately running storage nodes.
     pub async fn run_until(self, shutdown: impl Future<Output = Result<()>>) -> Result<()> {
         self.rpc
             .run_until(

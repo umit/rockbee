@@ -2,12 +2,19 @@ mod kv;
 mod lifecycle;
 mod table;
 
+/// Result returned by [`Table::query`], including its rows and published-data
+/// watermark.
 pub use rockbee_protocol::table::QueryResult;
 pub use table::{Table, TablePutHandle};
 
 use lifecycle::{Lifecycle, Operation};
 use rockbee_protocol::transport::{Admission, Link};
 use rockbee_protocol::{INTERNAL_MAX_IN_FLIGHT, Request, Response};
+/// Error types and result aliases used by the public client API.
+///
+/// Inspect [`MutationError`] and [`MutationOutcome`] after a PUT or DELETE
+/// failure: [`MutationOutcome::Unknown`] means the mutation may have reached
+/// durable storage and must not be blindly replayed.
 pub use rockbee_protocol::{MutationError, MutationOutcome, MutationResult, Result};
 use std::future::Future;
 use std::pin::Pin;
@@ -61,14 +68,17 @@ impl ClientConfig {
         })
     }
 
+    /// Total time budget per operation, including connection setup and admission waiting.
     pub fn request_timeout(self) -> Duration {
         self.request_timeout
     }
 
+    /// Maximum requests admitted concurrently on this client's connection.
     pub fn max_in_flight(self) -> usize {
         self.max_in_flight
     }
 
+    /// Maximum requests waiting for an in-flight admission on this client.
     pub fn max_pending(self) -> usize {
         self.max_pending
     }
@@ -84,11 +94,13 @@ impl Default for ClientConfig {
     }
 }
 
-/// Cloneable client for opaque bytes and JSON tables over one bounded TCP connection.
+/// Cloneable, task-safe client for opaque bytes and JSON tables over one bounded TCP connection.
 ///
 /// Key-value operations are the default: use [`Self::put`], [`Self::get`], and
 /// [`Self::delete`] directly. Use [`Self::table`] to select a JSON table.
 /// Both APIs share admission limits, mutation outcomes, and graceful shutdown.
+/// Clones share the same connection, limits, lifecycle gate, and shutdown state,
+/// so concurrent Tokio tasks can use one client without opening a connection per task.
 ///
 /// PUT, GET and DELETE require nonempty keys; PUT also requires a nonempty value.
 /// Empty inputs are rejected locally before admission or sending a request.
@@ -141,13 +153,20 @@ impl RockBeeClient {
         tracing::debug!("client shutdown completed");
     }
 
+    /// Connect to a Rockbee gateway with [`ClientConfig::default`] settings.
+    ///
+    /// Call this from a running Tokio runtime. It returns after the transport
+    /// connection is established, or returns a connection error; it does not
+    /// preflight writer or reader availability for later operations.
     pub async fn connect(address: &str) -> Result<Self> {
         Self::connect_with_config(address, ClientConfig::default()).await
     }
 
     /// Connect using explicit bounded request settings.
     ///
-    /// [`RockBeeClient::connect`] uses [`ClientConfig::default`].
+    /// [`RockBeeClient::connect`] uses [`ClientConfig::default`]. Call this
+    /// from a running Tokio runtime. It establishes the transport connection
+    /// but does not preflight writer or reader availability for later operations.
     pub async fn connect_with_config(address: &str, config: ClientConfig) -> Result<Self> {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| "RockBeeClient::connect requires a Tokio runtime")?;

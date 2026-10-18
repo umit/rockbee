@@ -123,7 +123,7 @@ use std::time::Duration;
 let client = RockBeeClient::connect("127.0.0.1:7100").await?;
 let products = client.table("products");
 let pending = products.put(&json!({"name":"Keyboard", "price":99.5}));
-println!("submitted {}", pending.id()); // UUID is available before awaiting.
+println!("submitted {}", pending.id()); // UUIDv7 is available before awaiting.
 let id = pending.await?; // Durable writer acknowledgement; returns the UUID.
 products.put_key("sku-1", &json!({"name":"Mouse"}), None).await?;
 let expiring = products.put_with_ttl(&json!({"name":"Offer"}), Duration::from_secs(60));
@@ -157,6 +157,11 @@ full source scan for each query. It additionally waits for Parquet publication; 
 Poll reads for eventual convergence. The runnable
 [`tables` example](examples/tables.rs) uses `GATEWAY_ADDR` and waits for its new
 products to appear in a real SQL query.
+
+Both auto-ID variants generate UUIDv7 IDs with a client-side timestamp. These
+IDs sort by their encoded timestamp; they do not establish distributed commit
+or reader visibility order. Caller-supplied IDs, including existing UUIDv4 IDs,
+remain valid.
 
 Both auto-ID variants are eager, including serialization and submission before
 returning the handle. A dropped `TablePutHandle` keeps running, and `shutdown`

@@ -8,49 +8,58 @@ use serde_json::json;
 use tokio::net::TcpListener;
 
 #[tokio::test]
-async fn generated_ids_are_available_before_await_and_put_starts_eagerly() -> Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?.to_string();
-    let peer = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
-        let (input, mut output) = stream.into_split();
-        let mut input = FrameReader::new(input);
-        let envelope = rockbee_protocol::RequestEnvelope::decode(
-            &read_frame(&mut input).await?.ok_or("EOF")?,
-        )?;
-        let Request::Table(TableRequest::Put {
-            table,
-            id,
-            value,
-            ttl_millis,
-        }) = envelope.request
-        else {
-            return Err("expected table put".into());
+async fn generated_v7_ids_are_available_before_await_and_put_starts_eagerly() -> Result<()> {
+    use std::time::Duration;
+
+    for (ttl, expected_ttl) in [(None, 0), (Some(Duration::from_secs(60)), 60_000)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?.to_string();
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (input, mut output) = stream.into_split();
+            let mut input = FrameReader::new(input);
+            let envelope = rockbee_protocol::RequestEnvelope::decode(
+                &read_frame(&mut input).await?.ok_or("EOF")?,
+            )?;
+            let Request::Table(TableRequest::Put {
+                table,
+                id,
+                value,
+                ttl_millis,
+            }) = envelope.request
+            else {
+                return Err("expected table put".into());
+            };
+            assert_eq!(table, "products");
+            assert_eq!(uuid::Uuid::parse_str(&id)?.get_version_num(), 7);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&value)?,
+                json!({"name":"Keyboard"})
+            );
+            assert_eq!(ttl_millis, expected_ttl);
+            write_frame(
+                &mut output,
+                &rockbee_protocol::ResponseEnvelope {
+                    request_id: envelope.request_id,
+                    response: Response::Ok,
+                },
+            )
+            .await?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(id)
+        });
+        let client: RockBeeClient = RockBeeClient::connect(&address).await?;
+        let table = client.table("products");
+        let handle = match ttl {
+            None => table.put(&json!({"name":"Keyboard"})),
+            Some(ttl) => table.put_with_ttl(&json!({"name":"Keyboard"}), ttl),
         };
-        assert_eq!(table, "products");
-        assert!(uuid::Uuid::parse_str(&id).is_ok());
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&value)?,
-            json!({"name":"Keyboard"})
-        );
-        assert_eq!(ttl_millis, 0);
-        write_frame(
-            &mut output,
-            &rockbee_protocol::ResponseEnvelope {
-                request_id: envelope.request_id,
-                response: Response::Ok,
-            },
-        )
-        .await?;
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(id)
-    });
-    let client: RockBeeClient = RockBeeClient::connect(&address).await?;
-    let handle = client.table("products").put(&json!({"name":"Keyboard"}));
-    let generated = handle.id().to_owned();
-    let observed = tokio::time::timeout(std::time::Duration::from_secs(2), peer).await???;
-    assert_eq!(generated, observed);
-    assert_eq!(handle.await?, generated);
-    client.shutdown().await;
+        let generated = handle.id().to_owned();
+        let observed = tokio::time::timeout(Duration::from_secs(2), peer).await???;
+        assert_eq!(generated, observed);
+        assert!(uuid::Uuid::parse_str(&generated)?.get_timestamp().is_some());
+        assert_eq!(handle.await?, generated);
+        client.shutdown().await;
+    }
     Ok(())
 }
 

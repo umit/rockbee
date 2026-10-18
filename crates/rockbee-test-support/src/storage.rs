@@ -3,7 +3,7 @@
 use crate::Result;
 use crate::config::ReaderConfig;
 use rockbee_reader::Reader;
-use rockbee_runtime::rejected;
+use rockbee_runtime::{Storage, rejected};
 use rockbee_writer::Writer;
 use slatedb::object_store::ObjectStore;
 use std::sync::Arc;
@@ -105,10 +105,8 @@ impl Store {
         &self,
         request: &rockbee_runtime::protocol::table::TableRequest,
     ) -> Result<rockbee_runtime::protocol::Response> {
-        match &self.engine {
-            Engine::Writer(writer) => writer.table(request).await,
-            Engine::Reader(reader) => reader.table(request).await,
-        }
+        self.handle_request(rockbee_runtime::protocol::Request::Table(request.clone()))
+            .await
     }
 
     fn writer(&self) -> Result<&Writer> {
@@ -121,7 +119,7 @@ impl Store {
     }
 }
 
-impl rockbee_runtime::Storage for Store {
+impl Storage for Store {
     async fn open_config(config: &crate::config::Config) -> Result<Self> {
         Self::open_with_memory_and_reader_config(
             config.role,
@@ -135,23 +133,14 @@ impl rockbee_runtime::Storage for Store {
     fn role(&self) -> Role {
         self.role()
     }
-    async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.put(key, value).await
-    }
-    async fn put_with_ttl(&self, key: &[u8], value: &[u8], ttl: u64) -> Result<()> {
-        self.put_with_ttl(key, value, ttl).await
-    }
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.get(key).await
-    }
-    async fn delete(&self, key: &[u8]) -> Result<()> {
-        self.delete(key).await
-    }
-    async fn table(
+    async fn handle_request(
         &self,
-        request: &rockbee_runtime::protocol::table::TableRequest,
+        request: rockbee_runtime::protocol::Request,
     ) -> Result<rockbee_runtime::protocol::Response> {
-        self.table(request).await
+        match &self.engine {
+            Engine::Writer(writer) => writer.handle_request(request).await,
+            Engine::Reader(reader) => reader.handle_request(request).await,
+        }
     }
     async fn close(&self) -> Result<()> {
         self.close().await

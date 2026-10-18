@@ -13,14 +13,19 @@ use std::time::Duration;
 /// A named JSON table sharing its client's connection, limits, and shutdown gate.
 ///
 /// Names and inputs are validated locally when an operation starts. Documents
-/// must be JSON objects. GET and SQL queries may lag durable writer acknowledgements.
+/// must be JSON objects. A table is a lightweight, cloneable selection: it does
+/// not create server state or open another connection. GET and SQL queries may
+/// lag durable writer acknowledgements.
 #[derive(Clone)]
 pub struct Table {
     client: RockBeeClient,
     name: String,
 }
 
-/// Eager document PUT with its generated UUID available before completion.
+/// Eager document PUT with its generated UUIDv7 available before completion.
+///
+/// The timestamp records client-side ID generation, not durable commit or
+/// reader visibility order. IDs do not establish ordering across clients.
 ///
 /// Dropping this handle does not cancel the mutation. Awaiting success returns
 /// the ID after the writer's durable acknowledgement. Errors preserve the same
@@ -32,7 +37,10 @@ pub struct TablePutHandle {
 }
 
 impl RockBeeClient {
-    /// Select a JSON table. Its name is validated when an operation starts.
+    /// Select a named JSON table.
+    ///
+    /// This returns a cloneable handle immediately; it neither creates server
+    /// state nor sends a request. The name is validated when an operation starts.
     pub fn table(&self, name: &str) -> Table {
         Table {
             client: self.clone(),
@@ -42,20 +50,25 @@ impl RockBeeClient {
 }
 
 impl Table {
-    /// Generate a UUID and immediately start storing a JSON object without expiry.
+    /// Generate a UUIDv7 and immediately start storing a JSON object without expiry.
+    ///
+    /// The ID is available from [`TablePutHandle::id`] before completion. The
+    /// write replaces the entire object stored under that ID; it does not merge
+    /// fields with an existing object.
     pub fn put(&self, document: &Value) -> TablePutHandle {
         self.put_generated(document, None)
     }
 
-    /// Generate a UUID and immediately start storing a JSON object with a TTL.
+    /// Generate a UUIDv7 and immediately start storing a JSON object with a TTL.
     ///
-    /// Zero means no expiry; positive fractions of a millisecond round up.
+    /// Zero means no expiry; positive fractions of a millisecond round up. The
+    /// write replaces, rather than merges with, an object at the generated ID.
     pub fn put_with_ttl(&self, document: &Value, ttl: Duration) -> TablePutHandle {
         self.put_generated(document, Some(ttl))
     }
 
     fn put_generated(&self, document: &Value, ttl: Option<Duration>) -> TablePutHandle {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = uuid::Uuid::now_v7().to_string();
         let put = self.put_key(&id, document, ttl);
         TablePutHandle { id, put }
     }
@@ -64,7 +77,8 @@ impl Table {
     ///
     /// Validation and serialization finish before admission or spawning. Dropping
     /// the returned handle does not cancel the write. `None` or zero TTL means
-    /// no expiry; positive fractions of a millisecond round up.
+    /// no expiry; positive fractions of a millisecond round up. A replacement
+    /// writes the whole object; fields from the previous object are not merged.
     pub fn put_key(&self, id: &str, document: &Value, ttl: Option<Duration>) -> PutHandle {
         let request = (|| -> Result<TableRequest> {
             if !document.is_object() {
@@ -87,8 +101,16 @@ impl Table {
 
     /// Read a JSON object, or `None` when the reader has no visible value.
     ///
+    /// The table name and ID address a separate namespace from raw KV. The
+    /// stored bytes are decoded into a JSON object; absent or expired documents
+    /// return `None`. This direct document lookup does not wait for SQL publication.
+    ///
     /// Readers converge eventually; a preceding durable PUT does not guarantee
     /// immediate visibility here.
+    ///
+    /// # Errors
+    /// Returns an error for invalid names/IDs, request failure, or a stored value
+    /// that cannot be decoded as a JSON object.
     pub async fn get(&self, id: &str) -> Result<Option<Value>> {
         let request = TableRequest::Get {
             table: self.name.clone(),
@@ -112,6 +134,8 @@ impl Table {
     }
 
     /// Delete an ID and wait for durable acknowledgement, without automatic retry.
+    /// Direct reader lookups and SQL queries may still show the document until
+    /// their respective views catch up. An error is not a rollback acknowledgement.
     pub async fn delete(&self, id: &str) -> MutationResult {
         let request = TableRequest::Delete {
             table: self.name.clone(),
@@ -136,7 +160,9 @@ impl Table {
     /// Run SQL against this table's eventually published Parquet data.
     ///
     /// SQL is sent verbatim to the reader. Returned rows use the selected column
-    /// names; `exported_wal_file_id` identifies the published export boundary.
+    /// names. [`QueryResult::exported_wal_file_id`] is the reader's published
+    /// export watermark, so it can lag a writer's durable PUT or DELETE
+    /// acknowledgement; it is not a per-request consistency guarantee.
     pub async fn query(&self, sql: &str) -> Result<QueryResult> {
         let request = TableRequest::Query {
             table: self.name.clone(),
@@ -153,7 +179,7 @@ impl Table {
 }
 
 impl TablePutHandle {
-    /// Generated UUID, available immediately even before the handle is awaited.
+    /// Generated UUIDv7, available immediately even before the handle is awaited.
     pub fn id(&self) -> &str {
         &self.id
     }

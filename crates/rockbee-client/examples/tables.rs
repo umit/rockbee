@@ -20,7 +20,7 @@ async fn demonstrate(client: &RockBeeClient) -> Result<()> {
     let id = put.await?;
 
     // Caller-supplied IDs allow replacements; this example uses its own UUID.
-    let supplied_id = format!("example-{}", uuid::Uuid::new_v4());
+    let supplied_id = format!("example-{}", uuid::Uuid::now_v7());
     products
         .put_key(
             &supplied_id,

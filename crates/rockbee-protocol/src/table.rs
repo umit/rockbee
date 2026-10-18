@@ -89,10 +89,16 @@ impl TableRequest {
     }
 }
 
-/// SQL output rows, each represented as a JSON object with the selected column names.
+/// Result of a SQL query against a published table projection.
+///
+/// Rows contain the selected SQL columns and aliases, not necessarily the original
+/// document shape. The watermark identifies the projection used by this query;
+/// it does not promise that the latest durable document write was included.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueryResult {
+    /// Result rows as JSON objects, keyed by SQL column names or aliases.
     pub rows: Vec<Value>,
+    /// WAL file ID recorded by the published projection; zero when no manifest exists.
     pub exported_wal_file_id: u64,
 }
 

@@ -3,7 +3,7 @@
 use rockbee_protocol::{MutationError, MutationOutcome};
 use rockbee_runtime::memory::MemoryConfig;
 use rockbee_runtime::ttl::{expiry_from, unix_millis, visible_value};
-use rockbee_runtime::{Result, Role, Storage, rejected};
+use rockbee_runtime::{ReadStorage, Result, Role, Storage, WriteStorage, rejected};
 use slatedb::Db;
 use slatedb::config::{PutOptions, Ttl, WriteOptions};
 use slatedb::object_store::ObjectStore;
@@ -17,6 +17,19 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<()> {
     rockbee_runtime::run_for_role::<Writer>(Role::Writer, args).await
 }
 
+/// The durable writer endpoint.
+///
+/// Implements [`ReadStorage`] and [`WriteStorage`] over the writable SlateDB
+/// engine. Mutations acknowledge durability, while a background exporter
+/// publishes JSON tables as Parquet. SQL queries run on reader compute.
+///
+/// ```compile_fail
+/// use rockbee_runtime::QueryStorage;
+/// use rockbee_writer::Writer;
+///
+/// fn requires_query<T: QueryStorage>() {}
+/// requires_query::<Writer>();
+/// ```
 pub struct Writer {
     db: Arc<Db>,
     prefix: String,
@@ -25,6 +38,8 @@ pub struct Writer {
 }
 
 impl Writer {
+    /// Opens the writable SlateDB engine and resumes table export when a catalogue exists.
+    /// Only one active writer may own a storage prefix; SlateDB enforces writer fencing.
     pub async fn open(
         prefix: &str,
         objects: Arc<dyn ObjectStore>,
@@ -64,6 +79,8 @@ impl Writer {
         Ok(writer)
     }
 
+    /// Inserts or replaces raw KV bytes without expiry and waits for durability.
+    /// Reader visibility can lag this acknowledgement. See [`WriteStorage::put`].
     pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let key = rockbee_runtime::key::to_storage_key(key).map_err(rejected)?;
         rockbee_protocol::validate_value_bytes(value).map_err(rejected)?;
@@ -82,6 +99,8 @@ impl Writer {
         Ok(())
     }
 
+    /// Durably writes raw KV bytes with expiry based on the writer's wall clock.
+    /// Zero means no expiry; invalid TTLs are rejected before mutation.
     pub async fn put_with_ttl(&self, key: &[u8], value: &[u8], ttl_millis: u64) -> Result<()> {
         let key = rockbee_runtime::key::to_storage_key(key).map_err(rejected)?;
         rockbee_protocol::validate_value_bytes(value).map_err(rejected)?;
@@ -100,6 +119,7 @@ impl Writer {
         Ok(())
     }
 
+    /// Waits for a durable raw KV deletion. Readers may temporarily retain their older view.
     pub async fn delete(&self, key: &[u8]) -> Result<()> {
         let key = rockbee_runtime::key::to_storage_key(key).map_err(rejected)?;
         self.db
@@ -112,6 +132,9 @@ impl Writer {
         Ok(())
     }
 
+    /// Reads an opaque raw KV key from this writer's current view.
+    /// Returns the stored bytes, or `None` when absent or expired.
+    /// See [`ReadStorage::get`] for the shared contract.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let key = rockbee_runtime::key::to_storage_key(key)?;
         visible_value(self.db.get_key_value(&key).await?)
@@ -132,68 +155,68 @@ impl Writer {
         Ok(())
     }
 
-    pub async fn table(
-        &self,
-        request: &rockbee_protocol::table::TableRequest,
-    ) -> Result<rockbee_protocol::Response> {
-        use rockbee_protocol::{
-            Response,
-            table::{TableRequest, table_key},
-        };
-        if request.is_mutation() {
-            request.validate().map_err(rejected)?;
-        } else {
-            request.validate()?;
-        }
-        match request {
-            TableRequest::Put {
-                table,
-                id,
-                value,
-                ttl_millis,
-            } => {
-                let expiry =
-                    expiry_from(unix_millis().map_err(rejected)?, *ttl_millis).map_err(rejected)?;
-                let ttl = expiry.map(Ttl::ExpireAtMillis).unwrap_or(Ttl::NoExpiry);
-                let mut batch = slatedb::WriteBatch::new();
-                batch.put_with_options(table_key(table, id)?, value, &PutOptions { ttl });
-                let mut catalogue = vec![2];
-                catalogue.extend_from_slice(table.as_bytes());
-                batch.put_with_options(
-                    catalogue,
-                    table.as_bytes(),
-                    &PutOptions { ttl: Ttl::NoExpiry },
-                );
-                self.db
-                    .write(batch)
-                    .await
-                    .map_err(unknown)?
-                    .await_durable()
-                    .await
-                    .map_err(unknown)?;
-                // Projection startup failure cannot revoke the durable document ACK.
-                if let Err(error) = self.ensure_exporter().await {
-                    tracing::error!(error=%error, "table exporter startup failed");
-                }
-                Ok(Response::Ok)
-            }
-            TableRequest::Get { table, id } => Ok(Response::Value {
-                value: visible_value(self.db.get_key_value(table_key(table, id)?).await?)?,
-            }),
-            TableRequest::Delete { table, id } => {
-                self.db
-                    .delete(table_key(table, id)?)
-                    .await
-                    .map_err(unknown)?
-                    .await_durable()
-                    .await
-                    .map_err(unknown)?;
-                Ok(Response::Ok)
-            }
-            TableRequest::Query { .. } => Err("SQL queries must be sent to a reader".into()),
-        }
+    /// Reads one document's JSON bytes from SlateDB by table name and ID.
+    /// Returns `None` when absent or expired. Table and raw KV namespaces are
+    /// separate; this lookup does not wait for Parquet publication.
+    /// See [`ReadStorage::table_get`] for validation and namespace semantics.
+    pub async fn table_get(&self, table: &str, id: &str) -> Result<Option<Vec<u8>>> {
+        let key = rockbee_protocol::table::table_key(table, id)?;
+        visible_value(self.db.get_key_value(key).await?)
     }
 
+    /// Validates and durably replaces a JSON document together with its catalogue entry.
+    /// A zero TTL means no expiry. The SQL projection is published asynchronously;
+    /// exporter startup failure cannot revoke an already durable acknowledgement.
+    pub async fn table_put(
+        &self,
+        table: &str,
+        id: &str,
+        value: &[u8],
+        ttl_millis: u64,
+    ) -> Result<()> {
+        let key = rockbee_protocol::table::table_key(table, id).map_err(rejected)?;
+        rockbee_protocol::table::validate_document(value).map_err(rejected)?;
+        let expiry = expiry_from(unix_millis().map_err(rejected)?, ttl_millis).map_err(rejected)?;
+        let ttl = expiry.map(Ttl::ExpireAtMillis).unwrap_or(Ttl::NoExpiry);
+        let mut batch = slatedb::WriteBatch::new();
+        batch.put_with_options(key, value, &PutOptions { ttl });
+        let mut catalogue = vec![2];
+        catalogue.extend_from_slice(table.as_bytes());
+        batch.put_with_options(
+            catalogue,
+            table.as_bytes(),
+            &PutOptions { ttl: Ttl::NoExpiry },
+        );
+        self.db
+            .write(batch)
+            .await
+            .map_err(unknown)?
+            .await_durable()
+            .await
+            .map_err(unknown)?;
+        // Projection startup failure cannot revoke the durable document ACK.
+        if let Err(error) = self.ensure_exporter().await {
+            tracing::error!(error=%error, "table exporter startup failed");
+        }
+        Ok(())
+    }
+
+    /// Validates the table/ID and waits for a durable document deletion.
+    /// Direct readers and the SQL projection converge independently afterward.
+    pub async fn table_delete(&self, table: &str, id: &str) -> Result<()> {
+        let key = rockbee_protocol::table::table_key(table, id).map_err(rejected)?;
+        self.db
+            .delete(key)
+            .await
+            .map_err(unknown)?
+            .await_durable()
+            .await
+            .map_err(unknown)?;
+        Ok(())
+    }
+
+    /// Stops the exporter, then closes SlateDB, preserving errors from either stage.
+    /// Closing cancels active export; it does not wait for the latest SQL projection.
     pub async fn close(&self) -> Result<()> {
         let exported = match self.exporter.lock().await.as_mut() {
             Some(exporter) => exporter.close().await,
@@ -230,25 +253,40 @@ impl Storage for Writer {
     fn role(&self) -> Role {
         Role::Writer
     }
+    async fn handle_request(
+        &self,
+        request: rockbee_protocol::Request,
+    ) -> Result<rockbee_protocol::Response> {
+        rockbee_runtime::server::handle_writer_request(self, request).await
+    }
+    async fn close(&self) -> Result<()> {
+        self.close().await
+    }
+}
+
+impl ReadStorage for Writer {
+    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.get(key).await
+    }
+    async fn table_get(&self, table: &str, id: &str) -> Result<Option<Vec<u8>>> {
+        self.table_get(table, id).await
+    }
+}
+
+impl WriteStorage for Writer {
     async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         self.put(key, value).await
     }
     async fn put_with_ttl(&self, key: &[u8], value: &[u8], ttl: u64) -> Result<()> {
         self.put_with_ttl(key, value, ttl).await
     }
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.get(key).await
-    }
     async fn delete(&self, key: &[u8]) -> Result<()> {
         self.delete(key).await
     }
-    async fn table(
-        &self,
-        request: &rockbee_protocol::table::TableRequest,
-    ) -> Result<rockbee_protocol::Response> {
-        self.table(request).await
+    async fn table_put(&self, table: &str, id: &str, value: &[u8], ttl: u64) -> Result<()> {
+        self.table_put(table, id, value, ttl).await
     }
-    async fn close(&self) -> Result<()> {
-        self.close().await
+    async fn table_delete(&self, table: &str, id: &str) -> Result<()> {
+        self.table_delete(table, id).await
     }
 }

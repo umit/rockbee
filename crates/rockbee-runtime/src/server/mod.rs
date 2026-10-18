@@ -1,34 +1,15 @@
 use crate::config::Config;
 use crate::protocol::{Request, Response, ServiceRole};
 use crate::rpc::{RpcServer, wait_for_shutdown};
-use crate::{Result, Role, RpcConfig};
+use crate::{Result, Role, RpcConfig, Storage};
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-/// A concrete role owns all storage behavior; the runtime only serves requests.
-pub trait Storage: Send + Sync + 'static {
-    fn open_config(config: &Config) -> impl Future<Output = Result<Self>> + Send
-    where
-        Self: Sized;
-    fn role(&self) -> Role;
-    fn put(&self, key: &[u8], value: &[u8]) -> impl Future<Output = Result<()>> + Send;
-    fn put_with_ttl(
-        &self,
-        key: &[u8],
-        value: &[u8],
-        ttl_millis: u64,
-    ) -> impl Future<Output = Result<()>> + Send;
-    fn get(&self, key: &[u8]) -> impl Future<Output = Result<Option<Vec<u8>>>> + Send;
-    fn delete(&self, key: &[u8]) -> impl Future<Output = Result<()>> + Send;
-    fn table(
-        &self,
-        request: &crate::protocol::table::TableRequest,
-    ) -> impl Future<Output = Result<Response>> + Send;
-    fn close(&self) -> impl Future<Output = Result<()>> + Send;
-}
+mod dispatch;
+pub use dispatch::{handle_reader_request, handle_writer_request};
 
 /// Storage endpoint. Shared RPC owns connections; each concrete role owns storage behavior.
 pub struct Server<S: Storage> {
@@ -148,32 +129,7 @@ async fn handle_request<S: Storage>(store: &S, request: Request) -> Result<Respo
         Request::Status => "status",
         Request::Table(_) => "table",
     };
-    let result = async {
-        match request {
-            Request::Put { key, value } => {
-                store.put(&key, &value).await?;
-                Ok(Response::Ok)
-            }
-            Request::PutWithTtl {
-                key,
-                value,
-                ttl_millis,
-            } => {
-                store.put_with_ttl(&key, &value, ttl_millis).await?;
-                Ok(Response::Ok)
-            }
-            Request::Get { key } => Ok(Response::Value {
-                value: store.get(&key).await?,
-            }),
-            Request::Delete { key } => {
-                store.delete(&key).await?;
-                Ok(Response::Ok)
-            }
-            Request::Table(request) => store.table(&request).await,
-            Request::Status => Err("Status must be handled locally by RPC".into()),
-        }
-    }
-    .await;
+    let result = store.handle_request(request).await;
     if let Err(error) = &result {
         tracing::warn!(operation, role = ?store.role(), error = %error, "storage request failed");
     }

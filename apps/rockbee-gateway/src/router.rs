@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::time::{Instant, timeout_at};
 
+/// Validates and routes requests through bounded upstream connections.
+/// Mutations use the writer once; reads may try other readers within one deadline.
 pub struct Router {
     writer: Upstream,
     readers: Vec<Upstream>,
@@ -18,10 +20,12 @@ pub struct Router {
 }
 
 impl Router {
+    /// Creates routing state with default upstream limits; connections open on demand.
     pub fn new(writer: String, readers: Vec<String>) -> Result<Self> {
         Self::new_with_upstream(writer, readers, UpstreamConfig::default())
     }
 
+    /// Creates routing state after validating the writer and nonempty reader topology.
     pub fn new_with_upstream(
         writer: String,
         readers: Vec<String>,
@@ -42,6 +46,11 @@ impl Router {
         })
     }
 
+    /// Validates the request before any upstream effect, then dispatches by operation.
+    ///
+    /// A missing value is a successful reader response, even if that reader lags.
+    /// A failed mutation is never retried because its effect may be uncertain.
+    /// Status requests are handled by RPC before reaching this method.
     pub async fn route(&self, request: Request) -> Result<Response> {
         // Local rejection is known unsent; validate before upstream effects.
         let validation = match &request {

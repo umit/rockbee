@@ -5,13 +5,15 @@ pub mod key;
 pub mod memory;
 mod runtime;
 pub mod server;
+pub mod storage;
 pub mod ttl;
 pub use rockbee_protocol as protocol;
 pub use rockbee_protocol::{Result, transport};
 pub use rockbee_rpc as rpc;
 pub use rockbee_rpc::RpcConfig;
 pub use runtime::run_for_role;
-pub use server::{Server, Storage};
+pub use server::Server;
+pub use storage::{QueryStorage, ReadStorage, Storage, WriteStorage};
 pub const DEFAULT_ADDR: &str = "127.0.0.1:7000";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
