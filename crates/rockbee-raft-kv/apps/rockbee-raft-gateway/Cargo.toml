@@ -1,0 +1,21 @@
+[package]
+name = "rockbee-raft-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Gateway application for the independent Rockbee Raft KV workspace"
+
+[dependencies]
+log.workspace = true
+env_logger.workspace = true
+rockbee-raft-protocol.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rockbee-raft-client = { path = "../../crates/rockbee-raft-client" }
+
+[lints]
+workspace = true

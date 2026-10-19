@@ -1,0 +1,19 @@
+# Stable three-node soak predesign
+
+Root's selected first checkpoint is a stable, opt-in ignored integration test using three owned node binaries and an in-process gateway. No add/remove, partition, leader kill or other injected fault belongs in this first test. Existing Tokio/TCP/storage defaults stay unchanged.
+
+```text
+shared public Client clones -> one gateway -> three owned node processes
+worker key: PUT(v1) -> GET(v1) -> PUT(v2) -> GET(v2) -> DELETE -> GET(None)
+```
+
+Predesign verifier vote: APPROVE this restricted checkpoint with the concrete measurement/ownership rules below. It measures repeated operating correctness and warm closed-loop throughput; it does not establish maximum capacity, open-loop latency, cold disk/S3 behavior, movement safety or physical power-loss durability.
+
+- Install handled cancellation signals before spawning, reuse exact Child ownership and node-before-TempDir cleanup. Unlike the recovery fixture, do not drop an entire scenario future while it owns spawned workers: handled signals request stop inside an owner scope that remains alive to stop new cycles, drain/join workers, then close client/gateway and children. A forced drain deadline aborts tasks and drains the JoinSet before resource cleanup. Parent SIGKILL/abort remains outside destructor cleanup. Configuration must cap duration/concurrency and prevent zero/overflow; an ignored test should require explicit opt-in parameters.
+- Complete cluster/directory readiness and actual data-group warmup before measurement; group-zero readiness alone does not prove four data groups ready. Reuse one shared public client connection through its clones, not a hidden connection per operation. Disjoint worker keys and worker/sequence/version-specific 1 KiB values make stale reads observable. Report the actual groups covered; if claiming a four-group soak, derive keys that cover all four rather than assuming a handful of hashes does so.
+- A successful committed mutation is followed by one exact strong GET assertion. Never retry a mismatched value or successful absence into eventual convergence. Unknown is not replayed or declared absent. Stop the dependent cycle after a failed/uncertain mutation; classify it separately from wrong-value/lost-acknowledged-write evidence. A GET availability failure also remains distinct from a wrong value. Fixture failure must clean up its children.
+- At duration expiry, stop starting cycles and account for owned in-flight work. Report actual measured elapsed time and whether drain time is included; numerator and denominator must cover the same interval. Do not silently discard slow/unfinished operations from success/latency reports.
+- Bound latency storage and metric queues independently of throughput/duration; do not retain every latency in an unbounded Vec. For example, 64 logarithmic microsecond buckets per worker are finite, but percentile outputs must say bucket range/upper bound rather than pretend to be precise quantiles. Start mutation timing before the eager admission call, not just before awaiting its handle. Emit count and p50/p95/p99 per operation class, plus total successful requests and completed cycles; distinguish operation TPS from cycle TPS. CSV output must preserve explicit units, warmup/measurement duration, concurrency, payload size, outcome counts and group coverage.
+- Retain result artifacts using an explicit owned output path without overwriting unrelated files. Aggregate or stream CSV rows; measurement overhead is part of this harness and is not a capacity proof. No new generic benchmark framework or dependency is needed for this checkpoint.
+
+Direct advisor/verifier exchange agrees on these exact rules, including structured worker shutdown and denominator accounting; no Judge disagreement. Runtime soak implementation/results remain pending; first review is the fixture behavior and measurement accounting, followed by an actual bounded run.

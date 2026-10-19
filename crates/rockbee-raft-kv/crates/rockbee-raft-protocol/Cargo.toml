@@ -1,0 +1,22 @@
+[package]
+name = "rockbee-raft-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Public wire protocol for the independent Rockbee Raft KV workspace"
+
+[dependencies]
+log.workspace = true
+bytes.workspace = true
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+fnv.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
