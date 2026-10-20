@@ -19,14 +19,14 @@ impl NodeService {
                 "different lifetime job is retained",
             ));
         }
-        if matches!(record.progress, MoveProgress::Completed { .. }) {
-            return Ok(());
-        }
-        let intent = record.intent;
         let group = self
             .groups
             .get(&data_group)
             .ok_or_else(|| read_error(FailureReason::WrongGroup, "group not hosted"))?;
+        if matches!(record.progress, MoveProgress::Completed { .. }) {
+            return seal_completed_move(group, &record.intent).await;
+        }
+        let intent = record.intent;
         let observed = self.observe_membership(data_group, deadline).await?;
         match topology(&observed, &intent)? {
             Topology::Source => {
@@ -67,7 +67,9 @@ impl NodeService {
                 .await
             {
                 match result {
-                    AdminResult::Completed { .. } => return Ok(()),
+                    AdminResult::Completed { .. } => {
+                        return seal_completed_move(group, &intent).await;
+                    }
                     AdminResult::Conflict { message } => {
                         return Err(read_error(FailureReason::InvalidRequest, message));
                     }
@@ -94,6 +96,15 @@ impl NodeService {
             }
             return Ok(());
         }
+        self.movement.check_running(deadline)?;
+        // The gate is independent from RocksDB writes. Re-read the durable
+        // local seal after acquiring it, including for a stale Source runner.
+        let _native_membership = group
+            .reader
+            .membership_control()
+            .begin(movement_identity(intent))
+            .await
+            .map_err(|error| read_error(FailureReason::Unavailable, error))?;
         self.movement.check_running(deadline)?;
         info!(
             "raft_move_add_learner group={} node={}",
@@ -220,6 +231,15 @@ impl NodeService {
         deadline: Instant,
     ) -> Result<(), ReadFailure> {
         self.movement.check_running(deadline)?;
+        // Retain this permit through BOTH native membership steps. Seal must
+        // wait for the real future, even after its request observer disconnects.
+        let _native_membership = group
+            .reader
+            .membership_control()
+            .begin(movement_identity(intent))
+            .await
+            .map_err(|error| read_error(FailureReason::Unavailable, error))?;
+        self.movement.check_running(deadline)?;
         if let Some(expected_vote) = expected_vote {
             let metrics = group.raft.metrics();
             let current = metrics.borrow();
@@ -260,4 +280,29 @@ impl NodeService {
         result.map_err(|error| read_error(FailureReason::Unavailable, error))?;
         Ok(())
     }
+}
+
+fn movement_identity(intent: &MoveIntent) -> crate::storage::MovementIdentity {
+    crate::storage::MovementIdentity {
+        revision: intent.expected_directory_revision,
+        job_id: intent.job_id,
+    }
+}
+
+/// Completion closes this node's old-job admission only. Accepting a successor
+/// still requires every possible executor plus a committed data-group fence.
+async fn seal_completed_move(group: &HostedGroup, intent: &MoveIntent) -> Result<(), ReadFailure> {
+    group
+        .reader
+        .membership_control()
+        .seal(movement_identity(intent))
+        .await
+        .map_err(|error| read_error(FailureReason::Unavailable, error))?;
+    info!(
+        "raft_move_local_sealed group={} revision={} job={:?}",
+        intent.data_group.get(),
+        intent.expected_directory_revision,
+        intent.job_id.get()
+    );
+    Ok(())
 }

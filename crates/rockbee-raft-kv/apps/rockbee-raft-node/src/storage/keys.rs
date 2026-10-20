@@ -5,6 +5,7 @@ pub(super) const VOTE: u8 = 1;
 pub(super) const PURGED: u8 = 2;
 pub(super) const COMMITTED: u8 = 3;
 pub(super) const IDENTITY: u8 = 0x80;
+pub(super) const MOVEMENT_SEAL: u8 = 0x81;
 
 pub(super) fn meta(group: u64, tag: u8) -> Vec<u8> {
     let mut key = group.to_be_bytes().to_vec();

@@ -18,6 +18,15 @@ struct StaleSourceFixture {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stale_source_a_adds_existing_d_only_after_b_completes_same_job() {
+    run_stale_source(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_move_seal_rejects_a_runner_with_an_old_source_observation() {
+    run_stale_source(true).await;
+}
+
+async fn run_stale_source(seal_before_release: bool) {
     let _ = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("rockbee_raft_node=info"),
     )
@@ -30,7 +39,11 @@ async fn stale_source_a_adds_existing_d_only_after_b_completes_same_job() {
     let scenario_owner = Arc::clone(&owner);
     // Retain all release/runtime owners outside the assertion task, including
     // when a native-success premise fails. Never cancel the native future.
-    let outcome = tokio::spawn(async move { stale_source_scenario(&scenario_owner).await }).await;
+    let outcome =
+        tokio::spawn(
+            async move { stale_source_scenario(&scenario_owner, seal_before_release).await },
+        )
+        .await;
     if let Some(pause) = owner.pause.lock().unwrap().as_ref() {
         pause.release();
     }
@@ -55,7 +68,7 @@ async fn stale_source_a_adds_existing_d_only_after_b_completes_same_job() {
     }
 }
 
-async fn stale_source_scenario(owner: &StaleSourceFixture) {
+async fn stale_source_scenario(owner: &StaleSourceFixture, seal_before_release: bool) {
     let fixture = &owner.cluster;
     let scenario = establish_baseline_at(fixture, 0, MoveJobId::new([113; 16]).unwrap()).await;
     let a = &fixture.nodes[0];
@@ -124,6 +137,19 @@ async fn stale_source_scenario(owner: &StaleSourceFixture) {
         "raft_stale_source_a_fresh_authority node=1 pre_release={pre_release:?} original_runner={runner:?} same_captured_source=true revision=2 completed={completed:?} original_native_entry=None original_native_result=None"
     );
 
+    if seal_before_release {
+        a.service.groups[&scenario.group]
+            .reader
+            .membership_control()
+            .seal(crate::storage::MovementIdentity {
+                revision: scenario.intent.expected_directory_revision,
+                job_id: scenario.intent.job_id,
+            })
+            .await
+            .unwrap();
+        require_original_held(fixture, &scenario, &pause, &captured, &observer);
+    }
+
     let release_requested_at = Instant::now();
     pause.release();
     timeout_at(scenario.deadline, pause.wait_exited())
@@ -135,65 +161,82 @@ async fn stale_source_scenario(owner: &StaleSourceFixture) {
         .unwrap();
     assert!(a.service.movement.tasks.lock().unwrap().is_empty());
     assert_eq!(a.service.movement.active.available_permits(), 4);
-    let returned = observer.snapshot().expect(
+    if seal_before_release {
+        assert!(
+            observer.snapshot().is_none(),
+            "a captured Source observation cannot bypass the durable local seal"
+        );
+        let final_membership = a
+            .service
+            .observe_membership(scenario.group, scenario.deadline)
+            .await
+            .unwrap();
+        require_exact_target(fixture, &scenario, &final_membership);
+        assert_eq!(final_membership.membership, pre_release.membership);
+        log::info!(
+            "raft_move_seal_stale_source node=1 original_runner={runner:?} seal_ack=true original_native_entry=None runner_joined=true unchanged_membership=true"
+        );
+    } else {
+        let returned = observer.snapshot().expect(
         "missing exact original stale Source add_learner entry/result receipt after original runner joined",
     );
-    assert_eq!(returned.identity, identity);
-    assert!(!returned.blocking);
-    assert!(release_requested_at <= returned.entered_at);
-    assert!(returned.entered_at <= returned.returned_at.unwrap());
-    let actual = returned
-        .result
-        .as_ref()
-        .expect("exact native invocation must resolve")
-        .as_ref()
-        .expect("stale Source add_learner of existing D must return actual Ok");
-    let membership = actual
-        .membership
-        .as_ref()
-        .expect("native membership response required");
-    assert_eq!(
-        membership.get_joint_config(),
-        &vec![BTreeSet::from([1, 2, 4])]
-    );
-    for endpoint in &fixture.endpoints {
-        let expected = (endpoint.node_id != scenario.request.remove_node)
-            .then_some(BasicNode::new(endpoint.peer_address.to_string()));
+        assert_eq!(returned.identity, identity);
+        assert!(!returned.blocking);
+        assert!(release_requested_at <= returned.entered_at);
+        assert!(returned.entered_at <= returned.returned_at.unwrap());
+        let actual = returned
+            .result
+            .as_ref()
+            .expect("exact native invocation must resolve")
+            .as_ref()
+            .expect("stale Source add_learner of existing D must return actual Ok");
+        let membership = actual
+            .membership
+            .as_ref()
+            .expect("native membership response required");
         assert_eq!(
-            membership.get_node(&endpoint.node_id.get()),
-            expected.as_ref()
+            membership.get_joint_config(),
+            &vec![BTreeSet::from([1, 2, 4])]
+        );
+        for endpoint in &fixture.endpoints {
+            let expected = (endpoint.node_id != scenario.request.remove_node)
+                .then_some(BasicNode::new(endpoint.peer_address.to_string()));
+            assert_eq!(
+                membership.get_node(&endpoint.node_id.get()),
+                expected.as_ref()
+            );
+        }
+        let pre_release_id = native_log_id(pre_release.membership);
+        assert!(actual.log_id.index > pre_release_id.index);
+        assert!(covers(Some(actual.log_id), Some(pre_release_id)));
+        let final_membership = a
+            .service
+            .observe_membership(scenario.group, scenario.deadline)
+            .await
+            .unwrap();
+        require_exact_target(fixture, &scenario, &final_membership);
+        assert!(covers(
+            Some(native_log_id(final_membership.membership)),
+            Some(actual.log_id)
+        ));
+        let MoveProgress::Completed {
+            membership: published,
+        } = completed.record.as_ref().unwrap().progress
+        else {
+            unreachable!()
+        };
+        let published_id = LogId::new(
+            openraft::CommittedLeaderId::new(published.term, published.leader_node_id.get()),
+            published.index,
+        );
+        assert!(covers(
+            Some(native_log_id(final_membership.membership)),
+            Some(published_id)
+        ));
+        log::info!(
+            "raft_stale_source_native_success original_runner={runner:?} actual={returned:?} pre_release={pre_release_id:?} final={final_membership:?} post_release_entry=true later_membership_index=true original_runner_joined=true permit_returned=true"
         );
     }
-    let pre_release_id = native_log_id(pre_release.membership);
-    assert!(actual.log_id.index > pre_release_id.index);
-    assert!(covers(Some(actual.log_id), Some(pre_release_id)));
-    let final_membership = a
-        .service
-        .observe_membership(scenario.group, scenario.deadline)
-        .await
-        .unwrap();
-    require_exact_target(fixture, &scenario, &final_membership);
-    assert!(covers(
-        Some(native_log_id(final_membership.membership)),
-        Some(actual.log_id)
-    ));
-    let MoveProgress::Completed {
-        membership: published,
-    } = completed.record.as_ref().unwrap().progress
-    else {
-        unreachable!()
-    };
-    let published_id = LogId::new(
-        openraft::CommittedLeaderId::new(published.term, published.leader_node_id.get()),
-        published.index,
-    );
-    assert!(covers(
-        Some(native_log_id(final_membership.membership)),
-        Some(published_id)
-    ));
-    log::info!(
-        "raft_stale_source_native_success original_runner={runner:?} actual={returned:?} pre_release={pre_release_id:?} final={final_membership:?} post_release_entry=true later_membership_index=true original_runner_joined=true permit_returned=true"
-    );
     require_no_regression(fixture, &scenario, &completed).await;
     let sibling = healthy_leader(
         &fixture.nodes,

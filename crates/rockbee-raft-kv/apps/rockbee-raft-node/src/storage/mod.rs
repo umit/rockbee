@@ -16,6 +16,7 @@ mod log;
 mod metadata;
 #[cfg(test)]
 mod metadata_tests;
+mod movement_seal;
 mod snapshot;
 mod state;
 #[cfg(test)]
@@ -26,6 +27,7 @@ pub(crate) use append_failure::AppendFailure;
 #[cfg(test)]
 pub(crate) use joint_apply_pause::{JointApplyObservation, JointApplyPause};
 pub use log::{LogReader, LogStore};
+pub(crate) use movement_seal::{MembershipControl, MovementIdentity};
 pub use snapshot::SnapshotBuilder;
 pub use state::{StateMachine, StateRead, StateReader};
 
@@ -458,6 +460,7 @@ struct Group {
     id: u64,
     shared: Arc<Shared>,
     gate: Arc<Semaphore>,
+    membership_gate: Arc<Semaphore>,
     retired: AtomicBool,
     publication: Mutex<()>,
     live_images: Mutex<std::collections::HashSet<u64>>,
@@ -508,6 +511,7 @@ impl Group {
             id,
             shared,
             gate: Arc::new(Semaphore::new(1)),
+            membership_gate: Arc::new(Semaphore::new(1)),
             retired: AtomicBool::new(false),
             publication: Mutex::new(()),
             live_images: Mutex::new(std::collections::HashSet::new()),

@@ -49,6 +49,11 @@ impl StateMachine {
 }
 
 impl StateReader {
+    /// Shares this exact group's independent native-membership admission gate.
+    pub(crate) fn membership_control(&self) -> super::MembershipControl {
+        super::MembershipControl::new(Arc::clone(&self.group))
+    }
+
     /// Injects one adapter persistence failure for this exact group's PUT.
     #[cfg(all(test, feature = "diagnostics"))]
     #[allow(clippy::unwrap_used)]

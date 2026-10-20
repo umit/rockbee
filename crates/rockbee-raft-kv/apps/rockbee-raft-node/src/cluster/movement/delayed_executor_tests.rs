@@ -41,6 +41,15 @@ pub(super) struct BackendReceipt {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delayed_b_native_membership_returns_only_after_a_completes_same_job() {
+    run_delayed_executor(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_move_seal_waits_for_the_whole_native_membership_call() {
+    run_delayed_executor(true).await;
+}
+
+async fn run_delayed_executor(seal_before_release: bool) {
     let _ = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("rockbee_raft_node=info"),
     )
@@ -53,8 +62,10 @@ async fn delayed_b_native_membership_returns_only_after_a_completes_same_job() {
     let scenario_owner = Arc::clone(&owner);
     // The assertion task never owns the only release/runtime handles. A failed
     // native-pending premise still releases first and joins the original work.
-    let outcome =
-        tokio::spawn(async move { delayed_executor_scenario(&scenario_owner).await }).await;
+    let outcome = tokio::spawn(async move {
+        delayed_executor_scenario(&scenario_owner, seal_before_release).await
+    })
+    .await;
     if let Some(pause) = owner.pause.lock().unwrap().as_ref() {
         pause.release();
     }
@@ -79,7 +90,7 @@ async fn delayed_b_native_membership_returns_only_after_a_completes_same_job() {
     }
 }
 
-async fn delayed_executor_scenario(owner: &DelayedFixture) {
+async fn delayed_executor_scenario(owner: &DelayedFixture, seal_before_release: bool) {
     let scenario = establish_baseline(&owner.cluster).await;
     let nodes = &owner.cluster.nodes;
     let (pause, joint, observer, original) = start_b_native_joint(owner, &scenario).await;
@@ -98,6 +109,30 @@ async fn delayed_executor_scenario(owner: &DelayedFixture) {
         original.invocation,
         scenario.request.job_id.get()
     );
+    let control = nodes[1].service.groups[&scenario.group]
+        .reader
+        .membership_control();
+    let identity = crate::storage::MovementIdentity {
+        revision: scenario.intent.expected_directory_revision,
+        job_id: scenario.intent.job_id,
+    };
+    let mut seal = std::pin::pin!(control.seal(identity));
+    if seal_before_release {
+        assert!(
+            !control.native_permit_available_for_test(),
+            "the exact pending native invocation must retain movement admission"
+        );
+        let pending = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(Future::poll(seal.as_mut(), cx).is_pending())
+        })
+        .await;
+        assert!(pending, "seal cannot acknowledge a still-owned native call");
+        require_original_pending(nodes, &scenario, &pause, &joint, &observer, &original);
+        log::info!(
+            "raft_move_seal_waiting node=2 invocation={} native_result=None seal_ack=false",
+            original.invocation
+        );
+    }
     let release_requested_at = Instant::now();
     pause.release();
     timeout_at(scenario.deadline, pause.wait_exited())
@@ -105,6 +140,27 @@ async fn delayed_executor_scenario(owner: &DelayedFixture) {
         .unwrap();
     assert!(pause.held_observation().is_none());
     let returned = wait_original_result(&observer, &original, scenario.deadline).await;
+    if seal_before_release {
+        // Keep the actual seal future owned until it resolves. The fixture's
+        // outer owner releases the native pause even if an assertion fails.
+        seal.await.unwrap();
+        assert!(control.begin(identity).await.is_err());
+        nodes[0].service.movement.drain().await;
+        assert!(
+            nodes[0].service.groups[&scenario.group]
+                .reader
+                .membership_control()
+                .begin(identity)
+                .await
+                .is_err(),
+            "the completing A runner must seal its own native admission"
+        );
+        log::info!(
+            "raft_move_seal_complete node=2 invocation={} native_result={:?} seal_ack=true later_native_admission=false",
+            original.invocation,
+            returned.result
+        );
+    }
     assert!(a_completed_at <= release_requested_at);
     assert!(
         release_requested_at <= returned.returned_at.unwrap(),
@@ -115,6 +171,16 @@ async fn delayed_executor_scenario(owner: &DelayedFixture) {
         .unwrap();
     assert!(nodes[1].service.movement.tasks.lock().unwrap().is_empty());
     assert_eq!(nodes[1].service.movement.active.available_permits(), 4);
+    if seal_before_release {
+        // A completed retry uses the same identity and performs no new native
+        // membership work; the local seal operation is idempotent.
+        nodes[1]
+            .service
+            .reconcile_move(scenario.group, scenario.request.job_id, scenario.deadline)
+            .await
+            .unwrap();
+        assert!(control.begin(identity).await.is_err());
+    }
     log::info!(
         "raft_delayed_original_return node=2 invocation={} job={:?} result={:?} a_completed_before_release_request=true release_request_before_native_return=true original_runner_joined=true permit_returned=true",
         returned.invocation,
