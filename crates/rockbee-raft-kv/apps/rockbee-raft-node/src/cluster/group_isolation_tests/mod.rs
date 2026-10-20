@@ -5,6 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::panic)]
 
+mod fatal;
 mod resources;
 
 use super::{NodeRuntime, service::authority_barrier};

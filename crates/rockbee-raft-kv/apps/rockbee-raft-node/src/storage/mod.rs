@@ -5,6 +5,8 @@
 // OpenRaft's capability traits require StorageError by value; preserve its
 // contextual error instead of allocating a second wrapper at every boundary.
 #![allow(clippy::result_large_err)]
+#[cfg(all(test, feature = "diagnostics"))]
+mod append_failure;
 #[cfg(test)]
 mod joint_apply_pause;
 mod keys;
@@ -17,6 +19,8 @@ mod state;
 #[cfg(test)]
 mod tests;
 
+#[cfg(all(test, feature = "diagnostics"))]
+pub(crate) use append_failure::AppendFailure;
 #[cfg(test)]
 pub(crate) use joint_apply_pause::{JointApplyObservation, JointApplyPause};
 pub use log::{LogReader, LogStore};
@@ -467,6 +471,8 @@ struct Group {
     test_writes: Mutex<std::collections::VecDeque<TestWriteAction>>,
     #[cfg(test)]
     joint_apply_pause: Mutex<Option<Arc<JointApplyPause>>>,
+    #[cfg(all(test, feature = "diagnostics"))]
+    append_failure: Mutex<Option<Arc<AppendFailure>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -515,6 +521,8 @@ impl Group {
             test_writes: Mutex::new(std::collections::VecDeque::new()),
             #[cfg(test)]
             joint_apply_pause: Mutex::new(None),
+            #[cfg(all(test, feature = "diagnostics"))]
+            append_failure: Mutex::new(None),
         }
     }
     fn cf(&self, name: &str) -> Result<&ColumnFamily, StoreError> {

@@ -185,9 +185,22 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             let final_callback = if finished { completion.take() } else { None };
             self.group
                 .write(&session, Lane::Log, ErrorSubject::Logs, move |group| {
-                    let result = append_chunk(group, chunk);
+                    #[cfg(all(test, feature = "diagnostics"))]
+                    let mut failure = None;
+                    let result = append_chunk(
+                        group,
+                        chunk,
+                        #[cfg(all(test, feature = "diagnostics"))]
+                        final_callback.is_some(),
+                        #[cfg(all(test, feature = "diagnostics"))]
+                        &mut failure,
+                    );
                     if let Some(callback) = final_callback {
                         callback.complete(&result);
+                        #[cfg(all(test, feature = "diagnostics"))]
+                        if let Some(failure) = failure {
+                            failure.record_failed_callback();
+                        }
                     }
                     result
                 })
@@ -314,7 +327,14 @@ fn decode_log_entry(group: &Group, key: &[u8], value: &[u8]) -> Result<Entry, St
     Ok(entry)
 }
 
-fn append_chunk(group: &Group, entries: Vec<super::PreparedEntry>) -> Result<(), StoreError> {
+fn append_chunk(
+    group: &Group,
+    entries: Vec<super::PreparedEntry>,
+    #[cfg(all(test, feature = "diagnostics"))] final_chunk: bool,
+    #[cfg(all(test, feature = "diagnostics"))] claimed_failure: &mut Option<
+        Arc<super::AppendFailure>,
+    >,
+) -> Result<(), StoreError> {
     let snapshot = group.shared.db.snapshot();
     let state = log_state(group, &snapshot)?;
     // Recovery may present a stale prefix already covered by the durable purge
@@ -351,14 +371,48 @@ fn append_chunk(group: &Group, entries: Vec<super::PreparedEntry>) -> Result<(),
         }
     }
     let mut batch = WriteBatch::default();
+    #[cfg(all(test, feature = "diagnostics"))]
+    let armed = group
+        .append_failure
+        .lock()
+        .expect("append failure lock")
+        .clone();
+    #[cfg(all(test, feature = "diagnostics"))]
+    let mut matching = None;
     for prepared in entries {
+        #[cfg(all(test, feature = "diagnostics"))]
+        if let Some(log_id) = armed
+            .as_ref()
+            .and_then(|f| f.matching_log_id(&prepared.entry))
+        {
+            assert!(
+                matching.replace(log_id).is_none(),
+                "one target PUT per batch"
+            );
+        }
         batch.put_cf(
             group.cf("raft_log")?,
             keys::log(group.id, prepared.entry.log_id.index),
             prepared.encoded,
         );
     }
-    group.persist(batch, ErrorSubject::Logs)
+    #[cfg(all(test, feature = "diagnostics"))]
+    if let (Some(failure), Some(log_id)) = (armed, matching) {
+        assert!(
+            final_chunk,
+            "targeted append failure requires the final chunk"
+        );
+        assert!(batch.size_in_bytes() <= group.shared.options.io_chunk_bytes);
+        if failure.arm(group, log_id) {
+            *claimed_failure = Some(failure);
+        }
+    }
+    let result = group.persist(batch, ErrorSubject::Logs);
+    #[cfg(all(test, feature = "diagnostics"))]
+    if let Some(failure) = claimed_failure {
+        failure.record_persist_result(&result);
+    }
+    result
 }
 
 struct AppendCompletion(Option<LogFlushed<TypeConfig>>);

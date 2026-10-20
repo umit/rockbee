@@ -48,12 +48,23 @@ pub(crate) struct ProposalSnapshot {
     pub(crate) dropped_before_completion: usize,
 }
 
+/// Captured synchronously on a real Fatal return while its permit is owned.
+#[cfg(all(test, feature = "diagnostics"))]
+#[derive(Clone, Debug)]
+pub(crate) struct FatalAdmissionSnapshot {
+    pub(crate) closed: bool,
+    pub(crate) available: usize,
+    pub(crate) native_active: usize,
+    pub(crate) error: String,
+}
+
 #[cfg(all(test, feature = "diagnostics"))]
 struct ProposalCounters {
     entered: AtomicUsize,
     completed: AtomicUsize,
     active: AtomicUsize,
     dropped_before_completion: AtomicUsize,
+    fatal: std::sync::Mutex<Option<FatalAdmissionSnapshot>>,
 }
 
 #[cfg(all(test, feature = "diagnostics"))]
@@ -138,6 +149,7 @@ impl NodeService {
                             completed: AtomicUsize::new(0),
                             active: AtomicUsize::new(0),
                             dropped_before_completion: AtomicUsize::new(0),
+                            fatal: std::sync::Mutex::new(None),
                         },
                     )
                 })
@@ -172,6 +184,15 @@ impl NodeService {
             .get(&group)
             .map(ProposalCounters::snapshot)
             .expect("test proposal group must be hosted")
+    }
+
+    #[cfg(all(test, feature = "diagnostics"))]
+    pub(crate) fn test_fatal_admission(&self, group: GroupId) -> Option<FatalAdmissionSnapshot> {
+        self.proposals[&group]
+            .fatal
+            .lock()
+            .expect("fatal observation lock poisoned")
+            .clone()
     }
 
     pub(super) fn leader_hint(&self, group: GroupId) -> Option<NodeId> {
@@ -446,6 +467,8 @@ impl NodeService {
         // proposal still has Unknown certainty on error, including Fatal.
         if matches!(&result, Err(RaftError::Fatal(_))) {
             group.mutation_admission.close();
+            #[cfg(all(test, feature = "diagnostics"))]
+            self.record_fatal_admission(id, group, format!("{result:?}"));
         }
         #[cfg(all(test, feature = "diagnostics"))]
         proposal.complete();
@@ -468,6 +491,21 @@ impl NodeService {
                 MutationOutcome::Unknown(failure(FailureReason::Unavailable, error))
             }
         }
+    }
+
+    #[cfg(all(test, feature = "diagnostics"))]
+    fn record_fatal_admission(&self, id: GroupId, group: &HostedGroup, error: String) {
+        let counters = &self.proposals[&id];
+        counters
+            .fatal
+            .lock()
+            .expect("fatal observation lock poisoned")
+            .get_or_insert_with(|| FatalAdmissionSnapshot {
+                closed: group.mutation_admission.is_closed(),
+                available: group.mutation_admission.available_permits(),
+                native_active: counters.active.load(Ordering::Relaxed),
+                error,
+            });
     }
 
     #[cfg(all(test, feature = "diagnostics"))]

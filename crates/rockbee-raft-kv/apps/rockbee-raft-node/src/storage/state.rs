@@ -49,6 +49,28 @@ impl StateMachine {
 }
 
 impl StateReader {
+    /// Injects one adapter persistence failure for this exact group's PUT.
+    #[cfg(all(test, feature = "diagnostics"))]
+    #[allow(clippy::unwrap_used)]
+    pub(crate) fn fail_append_for_test(
+        &self,
+        key: Bytes,
+        value: Bytes,
+    ) -> Arc<super::AppendFailure> {
+        let failure = Arc::new(super::AppendFailure::new(
+            rockbee_raft_protocol::GroupId::new(self.group.id),
+            key,
+            value,
+        ));
+        let mut slot = self.group.append_failure.lock().unwrap();
+        assert!(
+            slot.is_none(),
+            "one append failure per actual group instance"
+        );
+        *slot = Some(Arc::clone(&failure));
+        failure
+    }
+
     #[cfg(test)]
     #[allow(clippy::unwrap_used)]
     pub(crate) fn pause_next_joint_apply_return(
