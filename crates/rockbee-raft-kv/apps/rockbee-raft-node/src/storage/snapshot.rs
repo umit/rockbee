@@ -2,6 +2,8 @@
 //! durable before their RocksDB descriptor; incomplete imports stay invisible.
 mod format;
 #[cfg(test)]
+mod process_tests;
+#[cfg(test)]
 mod tests;
 use self::format::{Fields, Header, ImageReader, ImageWriter, Meta, Summary};
 use super::{
