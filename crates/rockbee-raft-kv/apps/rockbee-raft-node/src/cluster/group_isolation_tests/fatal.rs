@@ -1,4 +1,4 @@
-//! An injected append persistence error drives actual OpenRaft Fatal handling.
+//! Exact pre/post-persist adapter errors drive actual public Fatal/failover paths.
 
 use super::{
     HEALTHY, OBSERVATION_LIMIT, Resources, STALLED, authority,
@@ -17,7 +17,23 @@ use tokio::{
 };
 
 const CLOSED_GATE_MESSAGE: &str = "group native mutation admission is closed";
+const FATAL_VALUE: &[u8] = b"injected-fatal-append";
 type SharedCapture = Arc<std::sync::Mutex<Capture>>;
+
+#[derive(Clone, Copy, Debug)]
+enum AppendPhase {
+    BeforePersist,
+    AfterPersist,
+}
+
+impl AppendPhase {
+    fn error_message(self) -> &'static str {
+        match self {
+            Self::BeforePersist => "injected durable write failure",
+            Self::AfterPersist => "injected post-write acknowledgment failure",
+        }
+    }
+}
 
 async fn captured_put(
     capture: &SharedCapture,
@@ -123,8 +139,28 @@ async fn verify_new_mutation_failover(
     resources: &Resources,
     client: usize,
     capture: &SharedCapture,
+    phase: AppendPhase,
 ) -> Result<(), String> {
     elect_b(resources, capture).await?;
+    if matches!(phase, AppendPhase::AfterPersist) {
+        // Record the public observation, not a claim that the original Unknown
+        // could no longer take effect. The durable A log is not a commit proof.
+        let observed = captured_get(
+            capture,
+            &resources.clients[client],
+            key(&resources.directory, STALLED, 0),
+        )
+        .await?;
+        log::info!("raft_post_write_unknown_read after_b_authority=true value={observed:?}");
+        if observed
+            .as_ref()
+            .is_some_and(|value| value.as_ref() != FATAL_VALUE)
+        {
+            return Err(format!(
+                "Unknown key returned unrelated bytes: {observed:?}"
+            ));
+        }
+    }
     let a = &resources.nodes[0];
     if resources
         .directory
@@ -191,7 +227,11 @@ async fn verify_new_mutation_failover(
     Ok(())
 }
 
-async fn observe(resources: &mut Resources, capture: &SharedCapture) -> Result<(), String> {
+async fn observe(
+    resources: &mut Resources,
+    capture: &SharedCapture,
+    phase: AppendPhase,
+) -> Result<(), String> {
     let original = resources.client().await?;
     let healthy_key = key(&resources.directory, HEALTHY, 1);
     captured_healthy(capture, &resources.clients[original], healthy_key).await?;
@@ -205,10 +245,16 @@ async fn observe(resources: &mut Resources, capture: &SharedCapture) -> Result<(
     }
 
     let fatal_key = key(&resources.directory, STALLED, 0);
-    let fatal_value = Bytes::from_static(b"injected-fatal-append");
-    let append_failure = resources.nodes[0].service.groups[&STALLED]
-        .reader
-        .fail_append_for_test(fatal_key.clone(), fatal_value.clone());
+    let fatal_value = Bytes::from_static(FATAL_VALUE);
+    let reader = &resources.nodes[0].service.groups[&STALLED].reader;
+    let append_failure = match phase {
+        AppendPhase::BeforePersist => {
+            reader.fail_append_for_test(fatal_key.clone(), fatal_value.clone())
+        }
+        AppendPhase::AfterPersist => {
+            reader.fail_append_after_persist_for_test(fatal_key.clone(), fatal_value.clone())
+        }
+    };
     let outcome = captured_put(
         capture,
         &resources.clients[original],
@@ -219,21 +265,24 @@ async fn observe(resources: &mut Resources, capture: &SharedCapture) -> Result<(
     if !matches!(outcome, MutationOutcome::Unknown(ref failure) if failure.reason == FailureReason::Unavailable)
     {
         return Err(format!(
-            "injected native Fatal must preserve Unknown(Unavailable), got {outcome:?}"
+            "{phase:?} adapter error must preserve public Unknown(Unavailable), got {outcome:?}"
         ));
     }
     wait_for("targeted append failure receipt", || {
         append_failure
             .receipt()
-            .is_some_and(|receipt| receipt.persist_failed && receipt.callback_failed)
+            .is_some_and(|receipt| receipt.callback_failed)
     })
     .await?;
     let receipt = append_failure
         .receipt()
         .expect("completed append failure receipt");
+    let expected_after = matches!(phase, AppendPhase::AfterPersist);
     if receipt.group_id != STALLED
         || receipt.log_id.index == 0
-        || !receipt.persist_failed
+        || receipt.persist_failed == expected_after
+        || receipt.native_persist_succeeded != expected_after
+        || receipt.injected_ack_error != expected_after
         || !receipt.callback_failed
     {
         return Err(format!("unexpected targeted append receipt: {receipt:?}"));
@@ -251,6 +300,8 @@ async fn observe(resources: &mut Resources, capture: &SharedCapture) -> Result<(
             group_id: receipt.group_id.get(),
             log_id: receipt.log_id,
             persist_failed: receipt.persist_failed,
+            native_persist_succeeded: receipt.native_persist_succeeded,
+            injected_ack_error: receipt.injected_ack_error,
             callback_failed: receipt.callback_failed,
             gate_closed: fatal.closed,
             available_at_close: fatal.available,
@@ -260,7 +311,7 @@ async fn observe(resources: &mut Resources, capture: &SharedCapture) -> Result<(
     if !fatal.closed
         || fatal.available != initial_capacity - 1
         || fatal.native_active != 1
-        || !fatal.error.contains("injected durable write failure")
+        || !fatal.error.contains(phase.error_message())
     {
         return Err(format!(
             "Fatal gate state must precede permit release: initial_capacity={initial_capacity} snapshot={fatal:?}"
@@ -332,10 +383,12 @@ async fn observe(resources: &mut Resources, capture: &SharedCapture) -> Result<(
     .await?;
     authority(&resources.nodes[0], GroupId::new(0)).await?;
     log::info!(
-        "raft_fatal_admission_verified group={} log_id={:?} persist_failed={} callback_failed={} closed={} available={} capacity={} active_at_close={} completed={} active_after={} dropped={} rejected_without_submission=true rejected_key_absent_nodes={} sibling_crud=true metadata_authority=true",
+        "raft_fatal_admission_verified phase={phase:?} group={} log_id={:?} persist_failed={} native_persist_succeeded={} injected_ack_error={} callback_failed={} closed={} available={} capacity={} active_at_close={} completed={} active_after={} dropped={} rejected_without_submission=true rejected_key_absent_nodes={} sibling_crud=true metadata_authority=true",
         receipt.group_id.get(),
         receipt.log_id,
         receipt.persist_failed,
+        receipt.native_persist_succeeded,
+        receipt.injected_ack_error,
         receipt.callback_failed,
         fatal.closed,
         fatal.available,
@@ -346,7 +399,7 @@ async fn observe(resources: &mut Resources, capture: &SharedCapture) -> Result<(
         finished.dropped_before_completion,
         resources.nodes.len(),
     );
-    verify_new_mutation_failover(resources, original, capture).await
+    verify_new_mutation_failover(resources, original, capture, phase).await
 }
 
 fn persist_capture(
@@ -401,6 +454,15 @@ fn persist_capture(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn local_fatal_closes_only_its_group_admission() {
+    run_fatal(AppendPhase::BeforePersist).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn post_write_fatal_preserves_unknown_and_fails_over() {
+    run_fatal(AppendPhase::AfterPersist).await;
+}
+
+async fn run_fatal(phase: AppendPhase) {
     let _ = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("rockbee_raft_node=info"),
     )
@@ -439,20 +501,21 @@ async fn local_fatal_closes_only_its_group_admission() {
         key(&resources.directory, STALLED, 1),
         key(&resources.directory, STALLED, 2),
     ];
-    let capture = Arc::new(std::sync::Mutex::new(Capture::new(
-        Topology {
-            cluster_id: resources.directory.cluster_id,
-            shards: resources.directory.shard_config,
-            revision: resources.directory.revision,
-            nodes: resources
-                .directory
-                .nodes
-                .clone()
-                .try_into()
-                .expect("exact ABC topology"),
-        },
-        initial,
-    )));
+    let topology = Topology {
+        cluster_id: resources.directory.cluster_id,
+        shards: resources.directory.shard_config,
+        revision: resources.directory.revision,
+        nodes: resources
+            .directory
+            .nodes
+            .clone()
+            .try_into()
+            .expect("exact ABC topology"),
+    };
+    let capture = Arc::new(std::sync::Mutex::new(match phase {
+        AppendPhase::BeforePersist => Capture::new(topology, initial),
+        AppendPhase::AfterPersist => Capture::post_write(topology, initial),
+    }));
     let owner = Arc::new(Mutex::new(resources));
     let starting_owner = Arc::clone(&owner);
     let mut startup = tokio::spawn(async move {
@@ -488,9 +551,10 @@ async fn local_fatal_closes_only_its_group_admission() {
 
     let observing = Arc::clone(&owner);
     let observed_capture = Arc::clone(&capture);
-    let mut observer =
-        tokio::spawn(async move { observe(&mut *observing.lock().await, &observed_capture).await });
-    let (result, capture_interrupted) = tokio::select! {
+    let mut observer = tokio::spawn(async move {
+        observe(&mut *observing.lock().await, &observed_capture, phase).await
+    });
+    let (mut result, capture_interrupted) = tokio::select! {
         result = &mut observer => {
             let interrupted = result.is_err();
             (result.map_err(message).and_then(|result| result), interrupted)
@@ -506,6 +570,24 @@ async fn local_fatal_closes_only_its_group_admission() {
         .unwrap_or_else(|_| panic!("observer released resources"))
         .into_inner();
     resources.close().await;
+    // Closing joins accepted native owners. Count after that boundary so a late
+    // replay cannot be hidden behind an earlier observation snapshot. This is
+    // native-call evidence, not a count of transmitted TCP frames.
+    let final_counts =
+        [0, 1, 2].map(|index| resources.nodes[index].service.test_proposals(STALLED));
+    let expected = [1, 1, 0];
+    if result.is_ok()
+        && final_counts.iter().zip(expected).any(|(counts, entered)| {
+            counts.entered != entered
+                || counts.completed != entered
+                || counts.active != 0
+                || counts.dropped_before_completion != 0
+        })
+    {
+        result = Err(format!(
+            "post-cleanup native counts require A1/B1/C0 with no active/dropped work: {final_counts:?}"
+        ));
+    }
     let recorded = persist_capture(
         &capture,
         &resources,
@@ -514,12 +596,16 @@ async fn local_fatal_closes_only_its_group_admission() {
         capture_interrupted,
     );
     log::info!(
-        "raft_fatal_history_result capture={recorded:?} path={}",
+        "raft_fatal_history_result phase={phase:?} capture={recorded:?} final_native={final_counts:?} path={}",
         capture_path.display()
     );
     result.expect("fatal group observation after owned cleanup");
     let (verdict, counts) =
         recorded.expect("complete capture persisted and reloaded after owned cleanup");
-    assert_eq!(counts, [10, 6, 4, 4, 1, 1, 4]);
+    let expected_counts = match phase {
+        AppendPhase::BeforePersist => [10, 6, 4, 4, 1, 1, 4],
+        AppendPhase::AfterPersist => [11, 6, 5, 4, 1, 1, 5],
+    };
+    assert_eq!(counts, expected_counts);
     assert!(matches!(verdict, super::history::Verdict::Legal { .. }));
 }

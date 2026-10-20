@@ -1,4 +1,4 @@
-//! Fixed-size public observations for the one Fatal/failover schedule.
+//! Bounded public observations for the two explicit Fatal/failover schedules.
 //! Receipt timestamps describe observation, never the end of an Unknown effect.
 
 use super::history;
@@ -11,12 +11,27 @@ use std::{
     path::Path,
 };
 
-const VERSION: u8 = 1;
-const MAX_ATTEMPTS: usize = 10;
+const VERSION: u8 = 2;
+const MAX_ATTEMPTS: usize = 11;
 const KEY_COUNT: usize = 6;
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_FIELD_BYTES: usize = 1024;
 const MAX_EVENTS: u64 = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+enum Schedule {
+    BeforePersist,
+    AfterPersist,
+}
+
+impl Schedule {
+    fn attempts(self) -> usize {
+        match self {
+            Self::BeforePersist => 10,
+            Self::AfterPersist => 11,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(super) struct Topology {
@@ -65,6 +80,8 @@ pub(super) struct FaultObservation {
     pub(super) group_id: u64,
     pub(super) log_id: LogId,
     pub(super) persist_failed: bool,
+    pub(super) native_persist_succeeded: bool,
+    pub(super) injected_ack_error: bool,
     pub(super) callback_failed: bool,
     pub(super) gate_closed: bool,
     pub(super) available_at_close: usize,
@@ -90,6 +107,7 @@ pub(super) struct NativeCounts {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(super) struct Capture {
     version: u8,
+    schedule: Schedule,
     /// This fixture does not infer the build revision. The outer report owns it.
     source_revision: Option<String>,
     topology: Topology,
@@ -106,9 +124,17 @@ pub(super) struct Capture {
 }
 
 impl Capture {
+    pub(super) fn post_write(topology: Topology, initial_absent: [Bytes; KEY_COUNT]) -> Self {
+        Self {
+            schedule: Schedule::AfterPersist,
+            ..Self::new(topology, initial_absent)
+        }
+    }
+
     pub(super) fn new(topology: Topology, initial_absent: [Bytes; KEY_COUNT]) -> Self {
         Self {
             version: VERSION,
+            schedule: Schedule::BeforePersist,
             source_revision: None,
             topology,
             initial_absent,
@@ -124,7 +150,10 @@ impl Capture {
     }
 
     pub(super) fn begin(&mut self, key: Bytes, operation: Operation) -> Result<u64, String> {
-        let Some(index) = self.attempts.iter().position(Option::is_none) else {
+        let Some(index) = self.attempts[..self.schedule.attempts()]
+            .iter()
+            .position(Option::is_none)
+        else {
             self.incomplete = true;
             return Err("capture attempt limit".into());
         };
@@ -182,8 +211,7 @@ impl Capture {
 
     pub(super) fn seal(&mut self, interrupted: bool) {
         self.incomplete |= interrupted
-            || self
-                .attempts
+            || self.attempts[..self.schedule.attempts()]
                 .iter()
                 .any(|slot| slot.as_ref().is_none_or(|attempt| attempt.notice.is_none()));
         self.horizon = self.last_event + 1;
@@ -233,8 +261,7 @@ impl Capture {
                 .collect(),
             horizon: self.horizon,
             complete: !self.incomplete
-                && self
-                    .attempts
+                && self.attempts[..self.schedule.attempts()]
                     .iter()
                     .all(|slot| slot.as_ref().is_some_and(|a| a.notice.is_some())),
         })
@@ -300,6 +327,12 @@ impl Capture {
     fn validate(&self) -> Result<(), String> {
         if self.version != VERSION {
             return Err("unsupported capture version".into());
+        }
+        if self.attempts[self.schedule.attempts()..]
+            .iter()
+            .any(Option::is_some)
+        {
+            return Err("captured attempt exceeds the selected schedule".into());
         }
         if self.last_event > MAX_EVENTS || self.horizon == 0 || self.horizon != self.last_event + 1
         {
@@ -459,6 +492,8 @@ mod tests {
             group_id: 1,
             log_id,
             persist_failed: true,
+            native_persist_succeeded: false,
+            injected_ack_error: false,
             callback_failed: true,
             gate_closed: true,
             available_at_close: 4,
@@ -705,5 +740,151 @@ mod tests {
         capture.attempts[0].as_mut().unwrap().operation =
             Operation::Put(Bytes::from(vec![0; MAX_FILE_BYTES + 1]));
         assert!(capture.persist(&path).is_err());
+    }
+
+    fn post_write_prefix() -> Capture {
+        let before = complete();
+        let mut capture =
+            Capture::post_write(before.topology.clone(), before.initial_absent.clone());
+        for a in before.attempts.iter().flatten() {
+            let id = capture.begin(a.key.clone(), a.operation.clone()).unwrap();
+            capture
+                .notice(id, a.notice.as_ref().unwrap().outcome.clone())
+                .unwrap();
+        }
+        let observed_at = capture.event();
+        capture.fault = Some(FaultObservation {
+            observed_at,
+            group_id: 1,
+            log_id: LogId::new(openraft::CommittedLeaderId::new(7, 1), 11),
+            persist_failed: false,
+            native_persist_succeeded: true,
+            injected_ack_error: true,
+            callback_failed: true,
+            gate_closed: true,
+            available_at_close: 4,
+            active_at_close: 1,
+        });
+        capture
+    }
+
+    fn post_write_complete(value: Option<Bytes>) -> Capture {
+        let mut capture = post_write_prefix();
+        let id = capture
+            .begin(capture.initial_absent[3].clone(), Operation::Get)
+            .unwrap();
+        capture.notice(id, Outcome::Value(value)).unwrap();
+        capture.seal(false);
+        capture
+    }
+
+    fn reload_exact(capture: &Capture) -> Capture {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.bin");
+        capture.persist(&path).unwrap();
+        let loaded = Capture::load(&path).unwrap();
+        assert_eq!(*capture, loaded);
+        loaded
+    }
+
+    #[test]
+    fn post_write_observed_absence_or_target_value_is_legal_without_execution_evidence() {
+        for value in [None, Some(Bytes::from_static(b"value"))] {
+            let capture = reload_exact(&post_write_complete(value));
+            let model = capture.history().unwrap();
+            assert!(model.complete);
+            assert_eq!(model.attempts.len(), 11);
+            assert!(
+                model.attempts[2].execution.is_none(),
+                "local persist cannot prove global application or completion"
+            );
+            assert!(matches!(
+                capture.verdict().unwrap(),
+                history::Verdict::Legal { .. }
+            ));
+            assert_eq!(capture.counts(), [11, 6, 5, 4, 1, 1, 5]);
+            let receipt = capture.fault.unwrap();
+            assert!(
+                receipt.native_persist_succeeded
+                    && receipt.injected_ack_error
+                    && receipt.callback_failed
+            );
+            assert!(!receipt.persist_failed);
+        }
+    }
+
+    #[test]
+    fn post_write_missing_extra_get_is_partial_even_with_a_persist_receipt() {
+        let mut capture = post_write_prefix();
+        capture.seal(false);
+        let capture = reload_exact(&capture);
+        assert!(!capture.history().unwrap().complete);
+        assert!(matches!(
+            capture.verdict().unwrap(),
+            history::Verdict::Inconclusive {
+                reason: history::Inconclusive::PartialCapture,
+                ..
+            }
+        ));
+        assert!(
+            complete().history().unwrap().complete,
+            "old ten-call schedule remains complete"
+        );
+    }
+
+    #[test]
+    fn post_write_impossible_value_is_illegal_and_open_get_is_partial() {
+        let capture = reload_exact(&post_write_complete(Some(Bytes::from_static(
+            b"never-written",
+        ))));
+        assert!(matches!(
+            capture.verdict().unwrap(),
+            history::Verdict::Illegal { .. }
+        ));
+        let mut pending = post_write_prefix();
+        pending
+            .begin(pending.initial_absent[3].clone(), Operation::Get)
+            .unwrap();
+        pending.seal(true);
+        let model = reload_exact(&pending).history().unwrap();
+        assert!(model.attempts.last().unwrap().notice.is_none());
+        assert!(matches!(
+            history::check(&model, 100_000).unwrap(),
+            history::Verdict::Inconclusive {
+                reason: history::Inconclusive::PartialCapture,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn schedule_limits_reject_hidden_extra_records_and_keep_the_post_write_bound() {
+        let mut post = post_write_prefix();
+        let key = post.initial_absent[3].clone();
+        let id = post.begin(key.clone(), Operation::Get).unwrap();
+        post.notice(id, Outcome::Value(None)).unwrap();
+        assert!(
+            post.begin(key, Operation::Get).is_err(),
+            "no twelfth call can enter the fixed capture"
+        );
+        post.seal(false);
+        assert!(matches!(
+            reload_exact(&post).verdict().unwrap(),
+            history::Verdict::Inconclusive {
+                reason: history::Inconclusive::PartialCapture,
+                ..
+            }
+        ));
+
+        let mut pre = complete();
+        pre.attempts[10] = post.attempts[10].clone();
+        assert!(pre.history().unwrap_err().contains("selected schedule"));
+        let directory = tempfile::tempdir().unwrap();
+        assert!(pre.persist(&directory.path().join("invalid.bin")).is_err());
+        assert_eq!(
+            complete().version,
+            2,
+            "the extended diagnostic format is versioned"
+        );
     }
 }

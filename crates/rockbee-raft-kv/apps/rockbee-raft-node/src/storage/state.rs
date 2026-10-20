@@ -57,11 +57,32 @@ impl StateReader {
         key: Bytes,
         value: Bytes,
     ) -> Arc<super::AppendFailure> {
-        let failure = Arc::new(super::AppendFailure::new(
+        self.install_append_failure(super::AppendFailure::new(
             rockbee_raft_protocol::GroupId::new(self.group.id),
             key,
             value,
-        ));
+        ))
+    }
+
+    /// Reports one adapter acknowledgment error only after a successful native
+    /// persist of this exact group's PUT. A durable log is not a committed value.
+    #[cfg(all(test, feature = "diagnostics"))]
+    pub(crate) fn fail_append_after_persist_for_test(
+        &self,
+        key: Bytes,
+        value: Bytes,
+    ) -> Arc<super::AppendFailure> {
+        self.install_append_failure(super::AppendFailure::after_persist(
+            rockbee_raft_protocol::GroupId::new(self.group.id),
+            key,
+            value,
+        ))
+    }
+
+    #[cfg(all(test, feature = "diagnostics"))]
+    #[allow(clippy::unwrap_used)]
+    fn install_append_failure(&self, failure: super::AppendFailure) -> Arc<super::AppendFailure> {
+        let failure = Arc::new(failure);
         let mut slot = self.group.append_failure.lock().unwrap();
         assert!(
             slot.is_none(),
