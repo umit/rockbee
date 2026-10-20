@@ -1,5 +1,5 @@
 //! Backend operations translate to explicit authority checks and Raft calls.
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 
 use bytes::Bytes;
 use log::{debug, trace, warn};
@@ -9,43 +9,59 @@ use openraft::{
 };
 use rockbee_raft_protocol::{
     Failure, FailureReason, GroupId, KvRequest, KvResponse, MutationOutcome, NodeId, ReadFailure,
-    WireRequest,
-    backend::{BackendOperation, BackendReply, BackendRequest, BackendResponse},
+    ShardConfig, WireRequest,
+    backend::{BackendOperation, BackendReply, BackendRequest, BackendResponse, BootstrapOutcome},
     routing::ClusterDirectory,
     transport::server::RequestHandler,
 };
 use tokio::time::{Instant, sleep_until};
 
 use crate::{
-    rpc::PeerIdentity,
-    storage::StateReader,
-    types::{Command, TypeConfig},
+    config::validate_metadata_candidate,
+    control::{MetadataCommand, MetadataResult, MetadataView},
+    rpc::{PeerIdentity, PeerLimits},
+    storage::{StateReader, StorageOptions},
+    types::{ApplyResult, Command, LogId, TypeConfig},
 };
 
-pub(super) const DIRECTORY_KEY: &[u8] = b"rockbee/internal/initial-directory/v1";
-
+#[derive(Clone)]
 pub(super) struct HostedGroup {
     pub raft: Raft<TypeConfig>,
     pub reader: StateReader,
 }
 
 /// The node's application service; peer RPC and public client requests stay separate.
+#[derive(Clone)]
 pub struct NodeService {
-    identity: PeerIdentity,
-    directory: ClusterDirectory,
+    pub(super) identity: PeerIdentity,
+    pub(super) shard_config: ShardConfig,
+    pub(super) bootstrap_origin: Option<ClusterDirectory>,
+    pub(super) storage: StorageOptions,
+    pub(super) peers: PeerLimits,
     pub(super) groups: BTreeMap<GroupId, HostedGroup>,
+    pub(super) metadata_seeds: Vec<crate::config::JoinSeed>,
+    pub(super) movement: std::sync::Arc<super::movement::MoveRunners>,
 }
 
 impl NodeService {
     pub(super) fn new(
         identity: PeerIdentity,
-        directory: ClusterDirectory,
+        shard_config: ShardConfig,
+        bootstrap_origin: Option<ClusterDirectory>,
+        storage: StorageOptions,
+        peers: PeerLimits,
         groups: BTreeMap<GroupId, HostedGroup>,
+        metadata_seeds: Vec<crate::config::JoinSeed>,
     ) -> Self {
         Self {
             identity,
-            directory,
+            shard_config,
+            bootstrap_origin,
+            storage,
+            peers,
             groups,
+            metadata_seeds,
+            movement: std::sync::Arc::new(super::movement::MoveRunners::new()),
         }
     }
 
@@ -79,6 +95,36 @@ impl NodeService {
             return rejection(&request.operation, failure);
         }
         match request.operation {
+            BackendOperation::MoveReplica(request) => {
+                let data_group = request.data_group;
+                let job_id = request.job_id;
+                BackendReply::Move {
+                    data_group,
+                    job_id,
+                    result: self.accept_move(request, deadline).await,
+                }
+            }
+            BackendOperation::GetMove { data_group } => BackendReply::MoveState {
+                data_group,
+                result: self.read_move(data_group, deadline).await.map(Box::new),
+            },
+            BackendOperation::ReconcileMove { data_group, job_id } => BackendReply::Reconcile {
+                data_group,
+                job_id,
+                result: self.schedule_move(data_group, job_id).await,
+            },
+            BackendOperation::ObserveMembership { data_group } => BackendReply::Membership {
+                data_group,
+                result: self
+                    .observe_membership(data_group, deadline)
+                    .await
+                    .map(Box::new),
+            },
+            BackendOperation::PublishMove { data_group, job_id } => BackendReply::Move {
+                data_group,
+                job_id,
+                result: self.publish_move(data_group, job_id, deadline).await,
+            },
             BackendOperation::Directory => {
                 BackendReply::Directory(self.read_directory(deadline).await)
             }
@@ -100,80 +146,84 @@ impl NodeService {
     }
 
     async fn read_directory(&self, deadline: Instant) -> Result<ClusterDirectory, ReadFailure> {
+        let origin = self.bootstrap_origin.as_ref().ok_or_else(|| {
+            ReadFailure(failure(
+                FailureReason::Unavailable,
+                "join nodes do not host metadata authority",
+            ))
+        })?;
         let group = self.groups.get(&GroupId::new(0)).ok_or_else(|| {
             ReadFailure(failure(
                 FailureReason::Unavailable,
                 "metadata group not hosted",
             ))
         })?;
-        let value = strong_read(
-            GroupId::new(0),
-            group,
-            Bytes::from_static(DIRECTORY_KEY),
-            deadline,
-        )
-        .await?
-        .ok_or_else(|| {
+        let required = authority_barrier(GroupId::new(0), group, deadline).await?;
+        let read = group
+            .reader
+            .read_metadata()
+            .await
+            .map_err(|error| ReadFailure(failure(FailureReason::Internal, error)))?;
+        check_read_deadline(deadline)?;
+        check_applied_covers(read.applied, required)?;
+        compatible_directory(read.view, origin)?.ok_or_else(|| {
             ReadFailure(failure(
                 FailureReason::Unavailable,
                 "directory is not initialized",
             ))
-        })?;
-        self.validate_stored_directory(&value)
+        })
     }
 
-    fn validate_stored_directory(&self, value: &[u8]) -> Result<ClusterDirectory, ReadFailure> {
-        let directory: ClusterDirectory = rockbee_raft_protocol::decode_frame(value)
-            .map_err(|error| ReadFailure(failure(FailureReason::Internal, error)))?;
-        directory
-            .validate()
-            .map_err(|error| ReadFailure(failure(FailureReason::Internal, error)))?;
-        if directory != self.directory {
-            return Err(ReadFailure(failure(
-                FailureReason::Internal,
-                "stored directory differs from configured immutable bootstrap",
-            )));
-        }
-        Ok(directory)
-    }
-
-    async fn bootstrap_directory(&self, deadline: Instant) -> MutationOutcome {
+    async fn bootstrap_directory(&self, deadline: Instant) -> BootstrapOutcome {
+        let Some(origin) = &self.bootstrap_origin else {
+            return BootstrapOutcome::NotSubmitted(failure(
+                FailureReason::Unavailable,
+                "join nodes do not host metadata authority",
+            ));
+        };
         let id = GroupId::new(0);
         let Some(group) = self.groups.get(&id) else {
-            return MutationOutcome::Rejected(failure(
+            return BootstrapOutcome::NotSubmitted(failure(
                 FailureReason::Unavailable,
                 "metadata group not hosted",
             ));
         };
-        match strong_read(id, group, Bytes::from_static(DIRECTORY_KEY), deadline).await {
-            Ok(Some(value)) => {
-                return match self.validate_stored_directory(&value) {
-                    Ok(_) => MutationOutcome::Committed,
-                    Err(error) => MutationOutcome::Rejected(error.0),
-                };
-            }
-            Err(error) => return MutationOutcome::Rejected(error.0),
-            Ok(None) => {}
-        }
-        let value = match rockbee_raft_protocol::encode_frame(&self.directory) {
-            Ok(value) => Bytes::from(value),
-            Err(error) => {
-                return MutationOutcome::Rejected(failure(FailureReason::Internal, error));
-            }
+        let command = MetadataCommand::InitializeDirectoryIfAbsent {
+            initial_directory: origin.clone(),
         };
-        // This temporary bootstrap protocol is safe only while every possible
-        // proposal has the same immutable configured bytes. Before allowing
-        // directory changes, replace this with an apply-time put-if-absent.
-        self.mutate(
-            id,
-            group,
-            Command::Put {
-                key: Bytes::from_static(DIRECTORY_KEY),
-                value,
-            },
-            deadline,
-        )
-        .await
+        self.submit_bootstrap_initialize(group, command, deadline)
+            .await
+    }
+
+    async fn submit_bootstrap_initialize(
+        &self,
+        group: &HostedGroup,
+        command: MetadataCommand,
+        deadline: Instant,
+    ) -> BootstrapOutcome {
+        if let Err(error) = validate_metadata_candidate(&command, &self.storage, self.peers) {
+            return BootstrapOutcome::NotSubmitted(failure(FailureReason::Internal, error));
+        }
+        if deadline <= Instant::now() {
+            return BootstrapOutcome::NotSubmitted(failure(
+                FailureReason::Deadline,
+                "expired before conditional initialization submission",
+            ));
+        }
+        if self.leader_hint(GroupId::new(0)) != Some(self.identity.node_id) {
+            return BootstrapOutcome::NotSubmitted(failure(
+                FailureReason::NotLeader,
+                "not the observed metadata leader before submission",
+            ));
+        }
+        // Keep the accepted Raft work owned until resolution, including after
+        // transport loss or deadline expiry. A conditional conflict is applied
+        // work, never a pre-submission rejection or a successful initialization.
+        let result = group
+            .raft
+            .client_write(Command::Metadata(Box::new(command)))
+            .await;
+        bootstrap_submission_result(result.map(|response| response.data))
     }
 
     async fn execute_kv(
@@ -196,7 +246,7 @@ impl NodeService {
         let key = match &request {
             KvRequest::Put { key, .. } | KvRequest::Get { key } | KvRequest::Delete { key } => key,
         };
-        if self.directory.shard_config.group_for_key(key).ok() != Some(group_id) {
+        if self.shard_config.group_for_key(key).ok() != Some(group_id) {
             return kv_rejection(
                 &request,
                 failure(
@@ -300,6 +350,22 @@ async fn strong_read(
     key: Bytes,
     deadline: Instant,
 ) -> Result<Option<Bytes>, ReadFailure> {
+    let required = authority_barrier(id, group, deadline).await?;
+    let view = group
+        .reader
+        .read_local(key)
+        .await
+        .map_err(|error| ReadFailure(failure(FailureReason::Internal, error)))?;
+    check_read_deadline(deadline)?;
+    check_applied_covers(view.applied, required)?;
+    Ok(view.value)
+}
+
+pub(super) async fn authority_barrier(
+    id: GroupId,
+    group: &HostedGroup,
+    deadline: Instant,
+) -> Result<Option<LogId>, ReadFailure> {
     let mut attempt = 0_u32;
     let required = loop {
         check_read_deadline(deadline)?;
@@ -355,22 +421,88 @@ async fn strong_read(
             }
         }
     };
-    let view = group
-        .reader
-        .read_local(key)
-        .await
-        .map_err(|error| ReadFailure(failure(FailureReason::Internal, error)))?;
-    check_read_deadline(deadline)?;
-    if view.applied.map(|id| id.index) < required.map(|id| id.index) {
+    Ok(required)
+}
+
+pub(super) fn check_applied_covers(
+    applied: Option<LogId>,
+    required: Option<LogId>,
+) -> Result<(), ReadFailure> {
+    let covers = match (applied, required) {
+        (_, None) => true,
+        (Some(applied), Some(required)) => {
+            (applied.index > required.index && applied.leader_id >= required.leader_id)
+                || applied == required
+        }
+        (None, Some(_)) => false,
+    };
+    if !covers {
         return Err(ReadFailure(failure(
             FailureReason::Internal,
             "state view does not cover the read barrier",
         )));
     }
-    Ok(view.value)
+    Ok(())
 }
 
-fn check_read_deadline(deadline: Instant) -> Result<(), ReadFailure> {
+pub(super) fn compatible_directory(
+    view: MetadataView,
+    configured_origin: &ClusterDirectory,
+) -> Result<Option<ClusterDirectory>, ReadFailure> {
+    let compatible = match view.origin() {
+        Some(origin) => origin == configured_origin,
+        // The validated loader permits origin-less legacy state only at
+        // canonical revision one without jobs. Initialization must still adopt it.
+        None => view
+            .directory()
+            .is_none_or(|current| current == configured_origin),
+    };
+    if !compatible {
+        return Err(ReadFailure(failure(
+            FailureReason::Internal,
+            "stored immutable origin differs from configured bootstrap",
+        )));
+    }
+    Ok(view.into_directory())
+}
+
+fn bootstrap_apply_result(result: ApplyResult) -> BootstrapOutcome {
+    match result {
+        ApplyResult::Metadata(
+            MetadataResult::Initialized { revision }
+            | MetadataResult::AlreadyInitialized { revision },
+        ) => match NonZeroU64::new(revision) {
+            Some(revision) => BootstrapOutcome::Ready { revision },
+            None => BootstrapOutcome::Unknown(failure(
+                FailureReason::Internal,
+                "initialization returned zero revision",
+            )),
+        },
+        ApplyResult::Metadata(MetadataResult::Conflict { reason }) => {
+            BootstrapOutcome::Conflict(failure(
+                FailureReason::InvalidRequest,
+                format!("conditional initialization conflict: {reason:?}"),
+            ))
+        }
+        _ => BootstrapOutcome::Unknown(failure(
+            FailureReason::Internal,
+            "unexpected conditional initialization apply result",
+        )),
+    }
+}
+
+fn bootstrap_submission_result(
+    result: Result<ApplyResult, impl std::fmt::Display>,
+) -> BootstrapOutcome {
+    // The Link deadline controls delivery. A known durable result retains its
+    // certainty even if the owned client_write operation resolved late.
+    match result {
+        Ok(result) => bootstrap_apply_result(result),
+        Err(error) => BootstrapOutcome::Unknown(failure(FailureReason::Unavailable, error)),
+    }
+}
+
+pub(super) fn check_read_deadline(deadline: Instant) -> Result<(), ReadFailure> {
     if deadline <= Instant::now() {
         return Err(ReadFailure(failure(
             FailureReason::Deadline,
@@ -382,9 +514,36 @@ fn check_read_deadline(deadline: Instant) -> Result<(), ReadFailure> {
 
 fn rejection(operation: &BackendOperation, error: Failure) -> BackendReply {
     match operation {
+        BackendOperation::MoveReplica(request) => BackendReply::Move {
+            data_group: request.data_group,
+            job_id: request.job_id,
+            result: rockbee_raft_protocol::control::AdminResult::Unknown {
+                message: error.message,
+            },
+        },
+        BackendOperation::GetMove { data_group } => BackendReply::MoveState {
+            data_group: *data_group,
+            result: Err(ReadFailure(error)),
+        },
+        BackendOperation::ObserveMembership { data_group } => BackendReply::Membership {
+            data_group: *data_group,
+            result: Err(ReadFailure(error)),
+        },
+        BackendOperation::ReconcileMove { data_group, job_id } => BackendReply::Reconcile {
+            data_group: *data_group,
+            job_id: *job_id,
+            result: Err(ReadFailure(error)),
+        },
+        BackendOperation::PublishMove { data_group, job_id } => BackendReply::Move {
+            data_group: *data_group,
+            job_id: *job_id,
+            result: rockbee_raft_protocol::control::AdminResult::Unknown {
+                message: error.message,
+            },
+        },
         BackendOperation::Directory => BackendReply::Directory(Err(ReadFailure(error))),
         BackendOperation::BootstrapDirectory => {
-            BackendReply::Bootstrap(MutationOutcome::Rejected(error))
+            BackendReply::Bootstrap(BootstrapOutcome::NotSubmitted(error))
         }
         BackendOperation::Leader { group_id } => BackendReply::Leader {
             group_id: *group_id,
@@ -406,10 +565,304 @@ fn kv_rejection(request: &KvRequest, error: Failure) -> KvResponse {
     }
 }
 
-fn failure(reason: FailureReason, message: impl std::fmt::Display) -> Failure {
+pub(super) fn failure(reason: FailureReason, message: impl std::fmt::Display) -> Failure {
     // At most256 Unicode scalars occupy at most1024 UTF-8 bytes.
     Failure {
         reason,
         message: message.to_string().chars().take(256).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use crate::{
+        control::{ConflictReason, DIRECTORY_KEY, MembershipObservation, ORIGIN_KEY},
+        storage::{OpenMode, Storage, StorageIdentity},
+        types::Entry,
+    };
+    use openraft::{CommittedLeaderId, EntryPayload, storage::RaftStateMachine};
+    use rockbee_raft_protocol::{
+        ClusterId, ShardConfig,
+        control::{CommittedLogPosition, MoveJobId, MoveReplica},
+        routing::NodeEndpoint,
+    };
+
+    fn log_id(term: u64, index: u64) -> LogId {
+        LogId::new(CommittedLeaderId::new(term, 1), index)
+    }
+
+    fn endpoint(id: u64) -> NodeEndpoint {
+        NodeEndpoint {
+            node_id: NodeId::new(id).unwrap(),
+            peer_address: format!("127.0.0.1:{}", 9000 + id).parse().unwrap(),
+            data_address: format!("127.0.0.1:{}", 10000 + id).parse().unwrap(),
+        }
+    }
+
+    fn directory() -> ClusterDirectory {
+        ClusterDirectory::initial(
+            ClusterId::new([27; 16]).unwrap(),
+            ShardConfig::new(1, 19).unwrap(),
+            (1..=3).map(endpoint).collect(),
+        )
+        .unwrap()
+    }
+
+    fn entry(index: u64, command: Command) -> Entry {
+        Entry {
+            log_id: log_id(3, index),
+            payload: EntryPayload::Normal(command),
+        }
+    }
+
+    fn initialize(directory: ClusterDirectory) -> Command {
+        Command::Metadata(Box::new(MetadataCommand::InitializeDirectoryIfAbsent {
+            initial_directory: directory,
+        }))
+    }
+
+    #[test]
+    fn read_coverage_checks_complete_identity_at_equal_index() {
+        let required = Some(log_id(3, 8));
+        assert!(check_applied_covers(required, required).is_ok());
+        assert!(check_applied_covers(Some(log_id(4, 9)), required).is_ok());
+        assert!(check_applied_covers(Some(log_id(4, 8)), required).is_err());
+        assert!(check_applied_covers(Some(log_id(3, 7)), required).is_err());
+        assert!(check_applied_covers(None, required).is_err());
+        assert!(check_applied_covers(None, None).is_ok());
+    }
+
+    #[test]
+    fn read_coverage_rejects_higher_index_with_older_leader() {
+        assert!(
+            check_applied_covers(Some(log_id(2, 9)), Some(log_id(3, 8))).is_err(),
+            "a larger applied index cannot contradict committed leader history"
+        );
+    }
+
+    #[test]
+    fn bootstrap_known_apply_result_keeps_certainty_after_deadline() {
+        let expired = Instant::now();
+        assert!(expired <= Instant::now());
+        for result in [
+            MetadataResult::Initialized { revision: 1 },
+            MetadataResult::AlreadyInitialized { revision: 2 },
+        ] {
+            assert!(matches!(
+                bootstrap_submission_result(Ok::<_, &str>(ApplyResult::Metadata(result))),
+                BootstrapOutcome::Ready { .. }
+            ));
+        }
+        assert!(matches!(
+            bootstrap_submission_result(Ok::<_, &str>(ApplyResult::Metadata(
+                MetadataResult::Conflict {
+                    reason: ConflictReason::BootstrapMismatch
+                }
+            )),),
+            BootstrapOutcome::Conflict(_)
+        ));
+    }
+
+    #[test]
+    fn bootstrap_certainty_uses_actual_apply_result_and_submission_boundary() {
+        for result in [
+            MetadataResult::Initialized { revision: 1 },
+            MetadataResult::AlreadyInitialized { revision: 2 },
+        ] {
+            assert!(matches!(
+                bootstrap_apply_result(ApplyResult::Metadata(result)),
+                BootstrapOutcome::Ready { .. }
+            ));
+        }
+        assert!(matches!(
+            bootstrap_apply_result(ApplyResult::Metadata(MetadataResult::Conflict {
+                reason: ConflictReason::BootstrapMismatch
+            })),
+            BootstrapOutcome::Conflict(_)
+        ));
+        for result in [
+            ApplyResult::Applied,
+            ApplyResult::Metadata(MetadataResult::Initialized { revision: 0 }),
+            ApplyResult::Metadata(MetadataResult::Accepted {
+                data_group: GroupId::new(1),
+                job_id: MoveJobId::new([1; 16]).unwrap(),
+            }),
+        ] {
+            assert!(matches!(
+                bootstrap_apply_result(result),
+                BootstrapOutcome::Unknown(_)
+            ));
+        }
+        let forward = openraft::error::ForwardToLeader::<u64, openraft::BasicNode>::empty();
+        assert!(matches!(
+            bootstrap_submission_result(Err(forward)),
+            BootstrapOutcome::Unknown(_)
+        ));
+        assert!(matches!(
+            bootstrap_submission_result(Err("storage failure")),
+            BootstrapOutcome::Unknown(_)
+        ));
+        assert!(matches!(
+            rejection(
+                &BackendOperation::BootstrapDirectory,
+                failure(FailureReason::Deadline, "expired")
+            ),
+            BackendReply::Bootstrap(BootstrapOutcome::NotSubmitted(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn coherent_directory_fixture_adopts_legacy_and_preserves_revision_two_on_rebootstrap() {
+        // Trusted state-machine fixture: this is not live learner movement.
+        let initial = directory();
+        let root = tempfile::tempdir().unwrap();
+        let storage = Storage::open(
+            root.path().join("db"),
+            StorageIdentity {
+                cluster_id: initial.cluster_id,
+                node_id: NodeId::new(1).unwrap(),
+                shard_config: initial.shard_config,
+            },
+            StorageOptions::default(),
+            OpenMode::CreateNew,
+        )
+        .await
+        .unwrap();
+        let mut stores = storage.open_group(GroupId::new(0)).unwrap();
+        stores
+            .state_machine
+            .apply([entry(
+                0,
+                Command::Put {
+                    key: Bytes::from_static(DIRECTORY_KEY),
+                    value: Bytes::from(rockbee_raft_protocol::encode_frame(&initial).unwrap()),
+                },
+            )])
+            .await
+            .unwrap();
+        let legacy = stores.state_machine.reader().read_metadata().await.unwrap();
+        assert_eq!(legacy.applied, Some(log_id(3, 0)));
+        assert!(legacy.view.origin().is_none());
+        assert_eq!(
+            compatible_directory(legacy.view, &initial).unwrap(),
+            Some(initial.clone())
+        );
+        let results = stores
+            .state_machine
+            .apply([entry(1, initialize(initial.clone()))])
+            .await
+            .unwrap();
+        assert_eq!(
+            bootstrap_apply_result(results[0].clone()),
+            BootstrapOutcome::Ready {
+                revision: NonZeroU64::new(1).unwrap(),
+            }
+        );
+        let movement = MoveReplica {
+            job_id: MoveJobId::new([1; 16]).unwrap(),
+            data_group: GroupId::new(1),
+            remove_node: NodeId::new(3).unwrap(),
+            add_node: endpoint(4),
+            expected_directory_revision: 1,
+        }
+        .derive_intent(&initial)
+        .unwrap();
+        stores
+            .state_machine
+            .apply([
+                entry(
+                    2,
+                    Command::Metadata(Box::new(MetadataCommand::BeginMove {
+                        intent: movement.clone(),
+                    })),
+                ),
+                entry(
+                    3,
+                    Command::Metadata(Box::new(MetadataCommand::CompleteMove {
+                        expected_directory_revision: 1,
+                        data_group: movement.data_group,
+                        job_id: movement.job_id,
+                        observation: MembershipObservation {
+                            uniform: true,
+                            voters: movement.target_voters,
+                            replacement_endpoint: movement.add_node.clone(),
+                            membership: CommittedLogPosition {
+                                term: 9,
+                                leader_node_id: NodeId::new(2).unwrap(),
+                                index: 99,
+                            },
+                        },
+                    })),
+                ),
+            ])
+            .await
+            .unwrap();
+        let read = stores.state_machine.reader().read_metadata().await.unwrap();
+        assert_eq!(read.applied, Some(log_id(3, 3)));
+        assert_eq!(read.view.origin(), Some(&initial));
+        assert!(read.view.job(movement.data_group).is_some());
+        let current = compatible_directory(read.view, &initial).unwrap().unwrap();
+        assert_eq!(current.revision, 2);
+        assert_eq!(
+            current.voters(movement.data_group).unwrap(),
+            movement.target_voters
+        );
+        let results = stores
+            .state_machine
+            .apply([entry(4, initialize(initial.clone()))])
+            .await
+            .unwrap();
+        assert_eq!(
+            bootstrap_apply_result(results[0].clone()),
+            BootstrapOutcome::Ready {
+                revision: NonZeroU64::new(2).unwrap(),
+            }
+        );
+        let read = stores.state_machine.reader().read_metadata().await.unwrap();
+        assert_eq!(read.applied, Some(log_id(3, 4)));
+        assert_eq!(
+            compatible_directory(read.view, &initial).unwrap(),
+            Some(current)
+        );
+        let mut incompatible = initial.clone();
+        incompatible.nodes[2].peer_address.set_port(19999);
+        let read = stores.state_machine.reader().read_metadata().await.unwrap();
+        assert!(compatible_directory(read.view, &incompatible).is_err());
+        let results = stores
+            .state_machine
+            .apply([entry(5, initialize(incompatible))])
+            .await
+            .unwrap();
+        assert!(matches!(
+            bootstrap_apply_result(results[0].clone()),
+            BootstrapOutcome::Conflict(_)
+        ));
+        assert_eq!(
+            stores
+                .state_machine
+                .reader()
+                .read_metadata()
+                .await
+                .unwrap()
+                .applied,
+            Some(log_id(3, 5))
+        );
+        stores
+            .state_machine
+            .apply([entry(
+                6,
+                Command::Delete {
+                    key: Bytes::from_static(ORIGIN_KEY),
+                },
+            )])
+            .await
+            .unwrap();
+        assert!(
+            stores.state_machine.reader().read_metadata().await.is_err(),
+            "later revision without origin is corruption"
+        );
     }
 }

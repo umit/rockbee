@@ -16,8 +16,11 @@ mod error;
 mod message;
 mod network;
 mod server;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use admission::{PeerLimits, PeerResources};
 pub use error::PeerError;
+pub(crate) use message::metadata_append_bytes;
 pub use network::{PeerNetwork, PeerNetworkFactory};
 pub use server::{PeerIdentity, PeerServer};

@@ -2,12 +2,47 @@
 //!
 //! A cached leader hint is only a routing suggestion. The destination still
 //! checks its authority before reading and classifies writes by submission.
+mod movement;
+pub use movement::{AppliedMembership, MoveState, ObservedLogPosition, ReconcileStatus};
+
+use std::num::NonZeroU64;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ClusterId, GroupId, KvExpectedResponse, KvRequest, KvResponse, MutationOutcome, NodeId,
-    ProtocolError, ReadFailure, WireRequest, routing::ClusterDirectory,
+    ClusterId, Failure, GroupId, KvExpectedResponse, KvRequest, KvResponse, NodeId, ProtocolError,
+    ReadFailure, WireRequest,
+    control::{AdminResult, MoveJobId, MoveReplica},
+    routing::ClusterDirectory,
 };
+
+/// Certainty of the receiver-owned conditional directory initialization.
+/// Public key/value mutation certainty remains a separate contract.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum BootstrapOutcome {
+    /// Initialization was applied or the same immutable origin already existed.
+    Ready {
+        /// Current validated directory revision, always nonzero.
+        revision: NonZeroU64,
+    },
+    /// The submitted conditional initialization durably lost its precondition.
+    Conflict(Failure),
+    /// The receiver proved it had not invoked Raft client_write.
+    NotSubmitted(Failure),
+    /// Submission may have happened; the final conditional result is unknown.
+    Unknown(Failure),
+}
+
+impl BootstrapOutcome {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        match self {
+            Self::Ready { .. } => Ok(()),
+            Self::Conflict(error) | Self::NotSubmitted(error) | Self::Unknown(error) => {
+                error.validate()
+            }
+        }
+    }
+}
 
 /// One node operation. Metadata is read through its own operation, not public KV.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -29,6 +64,32 @@ pub enum BackendOperation {
     /// Publishes only the receiver's immutable initial directory in group zero.
     /// No caller-supplied metadata or arbitrary reserved-key write is accepted.
     BootstrapDirectory,
+    /// Accepts a single immutable lifetime replacement; no voter sets supplied.
+    MoveReplica(MoveReplica),
+    /// Reads current directory and retained job coherently through group zero.
+    GetMove {
+        /// Data group whose one lifetime job is requested.
+        data_group: GroupId,
+    },
+    /// Schedules bounded receiver-owned execution of the retained job.
+    ReconcileMove {
+        /// Data group whose stored target is resumed.
+        data_group: GroupId,
+        /// Retained immutable job identity.
+        job_id: MoveJobId,
+    },
+    /// Internal authoritative applied observation, never a completion input.
+    ObserveMembership {
+        /// Actual data authority to observe.
+        data_group: GroupId,
+    },
+    /// Internal trigger; receiver independently obtains completion evidence.
+    PublishMove {
+        /// Data group whose applied target must be reobserved.
+        data_group: GroupId,
+        /// Retained immutable job identity, never an observation witness.
+        job_id: MoveJobId,
+    },
 }
 
 /// Explicit destination identity prevents accidental cross-cluster/node routing.
@@ -61,8 +122,40 @@ pub enum BackendReply {
         /// Candidate leader, never permission to replay an uncertain mutation.
         leader_hint: Option<NodeId>,
     },
-    /// Durable initial publication, safe rejection, or uncertain submission.
-    Bootstrap(MutationOutcome),
+    /// Conditional initialization result, separate from public mutation results.
+    Bootstrap(BootstrapOutcome),
+    /// Acceptance or publication result bound to the named job.
+    Move {
+        /// Group bound to the acceptance or publication request.
+        data_group: GroupId,
+        /// Job bound to the original request.
+        job_id: MoveJobId,
+        /// Durable result or explicit bounded conflict/unknown status.
+        result: AdminResult,
+    },
+    /// Coherent metadata view bound to the requested group.
+    MoveState {
+        /// Group bound to the metadata read request.
+        data_group: GroupId,
+        /// Coherent directory and retained record, boxed off ordinary KV replies.
+        result: Result<Box<MoveState>, ReadFailure>,
+    },
+    /// Quick admission result; the runner outlives this response.
+    Reconcile {
+        /// Group bound to the scheduling request.
+        data_group: GroupId,
+        /// Job bound to the scheduling request.
+        job_id: MoveJobId,
+        /// Immediate scheduling status, separate from durable completion.
+        result: Result<ReconcileStatus, ReadFailure>,
+    },
+    /// Actual applied membership of the requested group.
+    Membership {
+        /// Actual group bound to the observation request.
+        data_group: GroupId,
+        /// Bounded applied proof, boxed to preserve ordinary reply size.
+        result: Result<Box<AppliedMembership>, ReadFailure>,
+    },
 }
 
 /// A backend response identifies the node that produced it.
@@ -89,6 +182,10 @@ enum ExpectedKind {
     Leader(GroupId),
     Kv(KvExpectedResponse),
     Bootstrap,
+    Move(GroupId, MoveJobId),
+    MoveState(GroupId),
+    Reconcile(GroupId, MoveJobId),
+    Membership(GroupId),
 }
 
 impl WireRequest<BackendResponse> for BackendRequest {
@@ -103,6 +200,30 @@ impl WireRequest<BackendResponse> for BackendRequest {
     fn validate(&self) -> Result<(), ProtocolError> {
         match &self.operation {
             BackendOperation::Directory | BackendOperation::BootstrapDirectory => Ok(()),
+            BackendOperation::MoveReplica(request) => {
+                validate_group(request.data_group, false)?;
+                // Round-trip conversion is unnecessary: deriving checks direct construction.
+                if request.expected_directory_revision == 0
+                    || request.remove_node == request.add_node.node_id
+                    || request.add_node.peer_address == request.add_node.data_address
+                    || [request.add_node.peer_address, request.add_node.data_address]
+                        .iter()
+                        .any(|address| {
+                            address.port() == 0
+                                || address.ip().is_unspecified()
+                                || address.ip().is_multicast()
+                        })
+                {
+                    return Err(ProtocolError::InvalidRouting("invalid move request"));
+                }
+                Ok(())
+            }
+            BackendOperation::GetMove { data_group }
+            | BackendOperation::ReconcileMove { data_group, .. }
+            | BackendOperation::ObserveMembership { data_group }
+            | BackendOperation::PublishMove { data_group, .. } => {
+                validate_group(*data_group, false)
+            }
             BackendOperation::Leader { group_id } => validate_group(*group_id, true),
             BackendOperation::Kv { group_id, request } => {
                 validate_group(*group_id, false)?;
@@ -127,6 +248,19 @@ impl WireRequest<BackendResponse> for BackendRequest {
             cluster_id: self.cluster_id,
             node_id: self.target_node,
             kind: match &self.operation {
+                BackendOperation::MoveReplica(request) => {
+                    ExpectedKind::Move(request.data_group, request.job_id)
+                }
+                BackendOperation::GetMove { data_group } => ExpectedKind::MoveState(*data_group),
+                BackendOperation::ReconcileMove { data_group, job_id } => {
+                    ExpectedKind::Reconcile(*data_group, *job_id)
+                }
+                BackendOperation::ObserveMembership { data_group } => {
+                    ExpectedKind::Membership(*data_group)
+                }
+                BackendOperation::PublishMove { data_group, job_id } => {
+                    ExpectedKind::Move(*data_group, *job_id)
+                }
                 BackendOperation::Directory => ExpectedKind::Directory,
                 BackendOperation::BootstrapDirectory => ExpectedKind::Bootstrap,
                 BackendOperation::Leader { group_id } => ExpectedKind::Leader(*group_id),
@@ -163,7 +297,70 @@ impl WireRequest<BackendResponse> for BackendRequest {
             (ExpectedKind::Kv(expected), BackendReply::Kv { response, .. }) => {
                 KvRequest::validate_response(expected, response)
             }
-            (ExpectedKind::Bootstrap, BackendReply::Bootstrap(outcome)) => outcome.validate_wire(),
+            (ExpectedKind::Bootstrap, BackendReply::Bootstrap(outcome)) => outcome.validate(),
+            (
+                ExpectedKind::Move(group, job),
+                BackendReply::Move {
+                    data_group,
+                    job_id,
+                    result,
+                },
+            ) if group == *data_group && job == *job_id => {
+                result.validate()?;
+                let intent = match result {
+                    AdminResult::Accepted { intent } | AdminResult::AlreadyAccepted { intent } => {
+                        Some(intent)
+                    }
+                    AdminResult::Completed { record } => Some(&record.intent),
+                    _ => None,
+                };
+                if intent.is_some_and(|intent| intent.data_group != group || intent.job_id != job) {
+                    return Err(ProtocolError::ResponseKindMismatch);
+                }
+                Ok(())
+            }
+            (ExpectedKind::MoveState(group), BackendReply::MoveState { data_group, result })
+                if group == *data_group =>
+            {
+                match result {
+                    Ok(state) => {
+                        state.directory.validate()?;
+                        if state.directory.cluster_id != expected.cluster_id {
+                            return Err(ProtocolError::InvalidRouting(
+                                "move directory cluster mismatch",
+                            ));
+                        }
+                        if let Some(record) = &state.record {
+                            record.validate()?;
+                            if record.intent.data_group != group {
+                                return Err(ProtocolError::ResponseKindMismatch);
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(error) => error.0.validate(),
+                }
+            }
+            (
+                ExpectedKind::Reconcile(group, job),
+                BackendReply::Reconcile {
+                    data_group,
+                    job_id,
+                    result,
+                },
+            ) if group == *data_group && job == *job_id => match result {
+                Ok(_) => Ok(()),
+                Err(error) => error.0.validate(),
+            },
+            (ExpectedKind::Membership(group), BackendReply::Membership { data_group, result })
+                if group == *data_group =>
+            {
+                match result {
+                    Ok(observation) if observation.data_group == group => observation.validate(),
+                    Ok(_) => Err(ProtocolError::ResponseKindMismatch),
+                    Err(error) => error.0.validate(),
+                }
+            }
             _ => Err(ProtocolError::ResponseKindMismatch),
         }
     }

@@ -5,13 +5,20 @@
 // OpenRaft's capability traits require StorageError by value; preserve its
 // contextual error instead of allocating a second wrapper at every boundary.
 #![allow(clippy::result_large_err)]
+#[cfg(test)]
+mod joint_apply_pause;
 mod keys;
 mod log;
+mod metadata;
+#[cfg(test)]
+mod metadata_tests;
 mod snapshot;
 mod state;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) use joint_apply_pause::{JointApplyObservation, JointApplyPause};
 pub use log::{LogReader, LogStore};
 pub use snapshot::SnapshotBuilder;
 pub use state::{StateMachine, StateRead, StateReader};
@@ -88,6 +95,17 @@ impl Default for StorageOptions {
 }
 
 impl StorageOptions {
+    /// Production control operations may expand a small command into metadata
+    /// effects alongside the largest durable membership/state record.
+    pub(crate) fn metadata_minimum_chunk_bytes(&self) -> Result<usize, StorageOpenError> {
+        self.max_entry_bytes
+            .checked_add(STATE_RECORD_OVERHEAD)
+            .and_then(|bytes| bytes.checked_add(STATE_BATCH_OVERHEAD))
+            .and_then(|bytes| bytes.checked_add(ENTRY_BATCH_OVERHEAD))
+            .and_then(|bytes| bytes.checked_add(crate::control::METADATA_EFFECT_RESERVATION))
+            .ok_or_else(|| StorageOpenError::InvalidOptions("metadata budget overflow".into()))
+    }
+
     pub fn validate(&self) -> Result<(), StorageOpenError> {
         if [
             self.block_cache_bytes,
@@ -163,6 +181,27 @@ impl StorageOptions {
     }
 }
 
+/// Counts the entire durable envelope with the largest possible assigned LogId.
+/// Candidate validation runs before cloning/serializing its bounded payload.
+pub(crate) fn metadata_entry_bytes(
+    command: &crate::control::MetadataCommand,
+) -> Result<usize, StorageOpenError> {
+    command
+        .validate()
+        .map_err(|error| StorageOpenError::InvalidOptions(error.to_string()))?;
+    let entry = Entry {
+        log_id: crate::types::LogId::new(
+            openraft::CommittedLeaderId::new(u64::MAX, u64::MAX),
+            u64::MAX,
+        ),
+        payload: openraft::EntryPayload::Normal(crate::types::Command::Metadata(Box::new(
+            command.clone(),
+        ))),
+    };
+    postcard::experimental::serialized_size(&(STORAGE_FORMAT, &entry))
+        .map_err(|error| StorageOpenError::InvalidOptions(error.to_string()))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorageOpenError {
     #[error("invalid storage options: {0}")]
@@ -232,6 +271,58 @@ impl Storage {
             },
             state_machine: StateMachine { group },
         })
+    }
+
+    /// Test-only evidence for physical prefix deletion without creating a
+    /// second mutable owner for an already running Raft group.
+    #[cfg(test)]
+    pub(crate) async fn test_log_prefix_is_empty(
+        &self,
+        id: GroupId,
+        through: u64,
+    ) -> Result<bool, StoreError> {
+        let group = self
+            .groups
+            .lock()
+            .map_err(|_| {
+                error(
+                    ErrorSubject::Logs,
+                    ErrorVerb::Read,
+                    "group registry poisoned",
+                )
+            })?
+            .get(&id.get())
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| {
+                error(
+                    ErrorSubject::Logs,
+                    ErrorVerb::Read,
+                    "test group is not active",
+                )
+            })?;
+        group
+            .read(ErrorSubject::Logs, move |group| {
+                let range = keys::LogRange::new(group.id, 0..=through).ok_or_else(|| {
+                    error(
+                        ErrorSubject::Logs,
+                        ErrorVerb::Read,
+                        "invalid test log range",
+                    )
+                })?;
+                let mut options = rocksdb::ReadOptions::default();
+                options.set_iterate_lower_bound(range.start);
+                options.set_iterate_upper_bound(range.end);
+                let snapshot = group.shared.db.snapshot();
+                match snapshot
+                    .iterator_cf_opt(group.cf("raft_log")?, options, IteratorMode::Start)
+                    .next()
+                {
+                    None => Ok(true),
+                    Some(Ok(_)) => Ok(false),
+                    Some(Err(cause)) => Err(error(ErrorSubject::Logs, ErrorVerb::Read, cause)),
+                }
+            })
+            .await
     }
 }
 
@@ -374,6 +465,8 @@ struct Group {
     snapshot_peak_record_bytes: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     test_writes: Mutex<std::collections::VecDeque<TestWriteAction>>,
+    #[cfg(test)]
+    joint_apply_pause: Mutex<Option<Arc<JointApplyPause>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -420,6 +513,8 @@ impl Group {
             snapshot_peak_record_bytes: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             test_writes: Mutex::new(std::collections::VecDeque::new()),
+            #[cfg(test)]
+            joint_apply_pause: Mutex::new(None),
         }
     }
     fn cf(&self, name: &str) -> Result<&ColumnFamily, StoreError> {
@@ -776,6 +871,7 @@ impl<I: Iterator<Item = Entry>> EntryChunks<I> {
         metadata: ChunkMetadata,
     ) -> Result<Option<Vec<PreparedEntry>>, StoreError> {
         let mut chunk = Vec::new();
+        let state_mode = matches!(metadata, ChunkMetadata::State { .. });
         let (mut bytes, mut replaced_record_bytes) = match metadata {
             ChunkMetadata::Log => (12, 0),
             ChunkMetadata::State {
@@ -801,6 +897,17 @@ impl<I: Iterator<Item = Entry>> EntryChunks<I> {
                     None => break,
                 },
             };
+            let metadata_entry = state_mode
+                && matches!(
+                    &next.entry.payload,
+                    openraft::EntryPayload::Normal(crate::types::Command::Metadata(_))
+                );
+            // Do not advance previous for lookahead: the next call consumes
+            // this entry once, after the preceding chunk is durable.
+            if metadata_entry && !chunk.is_empty() {
+                self.pending = Some(next);
+                break;
+            }
             // The old state record is not written when this chunk replaces its
             // membership. Only subtract its native-write reservation: ownership
             // of prior state/input/encoded buffers is retained until consumed.
@@ -811,8 +918,13 @@ impl<I: Iterator<Item = Entry>> EntryChunks<I> {
             } else {
                 bytes
             };
+            let entry_charge = if metadata_entry {
+                crate::control::METADATA_EFFECT_RESERVATION
+            } else {
+                next.encoded.len()
+            };
             let next_bytes = batch_bytes
-                .checked_add(next.encoded.len())
+                .checked_add(entry_charge)
                 .and_then(|n| n.checked_add(ENTRY_BATCH_OVERHEAD))
                 .ok_or_else(|| {
                     error(ErrorSubject::Logs, ErrorVerb::Write, "chunk size overflow")
@@ -822,7 +934,11 @@ impl<I: Iterator<Item = Entry>> EntryChunks<I> {
                     return Err(error(
                         ErrorSubject::Logs,
                         ErrorVerb::Write,
-                        "entry and metadata exceed chunk byte budget",
+                        if metadata_entry {
+                            "metadata effect reservation exceeds chunk byte budget"
+                        } else {
+                            "entry and metadata exceed chunk byte budget"
+                        },
                     ));
                 }
                 self.pending = Some(next);
@@ -843,6 +959,9 @@ impl<I: Iterator<Item = Entry>> EntryChunks<I> {
             }
             bytes = next_bytes;
             chunk.push(next);
+            if metadata_entry {
+                break;
+            }
         }
         Ok((!chunk.is_empty()).then_some(chunk))
     }

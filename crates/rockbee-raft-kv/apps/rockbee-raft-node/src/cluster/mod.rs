@@ -1,5 +1,7 @@
 //! Process lifecycle and group orchestration; storage and RPC keep their own jobs.
 mod bootstrap;
+mod join;
+mod movement;
 mod service;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -13,7 +15,7 @@ use rockbee_raft_protocol::{
 use tokio::net::TcpListener;
 
 use crate::{
-    config::NodeConfig,
+    config::{JoinConfig, NodeConfig, ResolvedStartup},
     rpc::{PeerError, PeerIdentity, PeerNetworkFactory, PeerResources, PeerServer},
     storage::{Storage, StorageIdentity, StorageOpenError},
     types::TypeConfig,
@@ -43,7 +45,7 @@ pub enum NodeError {
 
 /// Owns one database, multiple Raft groups, and separate peer/data listeners.
 pub struct NodeRuntime {
-    config: NodeConfig,
+    config: ResolvedStartup,
     service: Arc<NodeService>,
     peer_server: PeerServer,
     data_server: Server,
@@ -54,6 +56,29 @@ pub struct NodeRuntime {
 }
 
 impl NodeRuntime {
+    /// Discovers current metadata before opening an uninitialized data node.
+    pub async fn start_join(config: JoinConfig) -> Result<Self, NodeError> {
+        config.validate()?;
+        let deadline = tokio::time::Instant::now() + config.startup_timeout;
+        join::discover_join_directory(&config, deadline).await?;
+        let peer = TcpListener::bind(config.local_endpoint.peer_address).await?;
+        let data = TcpListener::bind(config.local_endpoint.data_address).await?;
+        Self::start_resolved(ResolvedStartup::join(config), peer, data).await
+    }
+
+    /// Join equivalent with owned listeners for race-free startup.
+    pub async fn start_join_with_listeners(
+        config: JoinConfig,
+        peer: TcpListener,
+        data: TcpListener,
+    ) -> Result<Self, NodeError> {
+        config.validate()?;
+        check_listeners(&config.local_endpoint, &peer, &data)?;
+        let deadline = tokio::time::Instant::now() + config.startup_timeout;
+        join::discover_join_directory(&config, deadline).await?;
+        Self::start_resolved(ResolvedStartup::join(config), peer, data).await
+    }
+
     /// Binds configured listeners, then recovers/creates the local groups.
     pub async fn start(config: NodeConfig) -> Result<Self, NodeError> {
         config.validate()?;
@@ -69,17 +94,66 @@ impl NodeRuntime {
         peer: TcpListener,
         data: TcpListener,
     ) -> Result<Self, NodeError> {
+        Self::start_resolved(ResolvedStartup::bootstrap(config)?, peer, data).await
+    }
+
+    async fn start_resolved(
+        config: ResolvedStartup,
+        peer: TcpListener,
+        data: TcpListener,
+    ) -> Result<Self, NodeError> {
+        check_listeners(&config.endpoint, &peer, &data)?;
+        Self::start_validated(
+            config,
+            peer,
+            data,
+            #[cfg(test)]
+            None,
+        )
+        .await
+    }
+
+    /// Only fixture-owned relay mappings may differ from the private listener.
+    #[cfg(test)]
+    async fn start_with_peer_relay(
+        config: NodeConfig,
+        peer: TcpListener,
+        data: TcpListener,
+        relays: &crate::rpc::test_support::PeerRelays,
+    ) -> Result<Self, NodeError> {
+        let config = ResolvedStartup::bootstrap(config)?;
+        check_relay_listeners(&config.endpoint, &peer, &data, relays)?;
+        Self::start_validated(config, peer, data, Some(relays.dispatch_tracker())).await
+    }
+
+    #[cfg(test)]
+    async fn start_join_with_peer_relay(
+        config: JoinConfig,
+        peer: TcpListener,
+        data: TcpListener,
+        relays: &crate::rpc::test_support::PeerRelays,
+    ) -> Result<Self, NodeError> {
         config.validate()?;
-        let endpoint = config.endpoint()?;
-        if peer.local_addr()? != endpoint.peer_address
-            || data.local_addr()? != endpoint.data_address
-        {
-            return Err(NodeError::Config(
-                "listeners do not match advertised node addresses".into(),
-            ));
-        }
+        check_relay_listeners(&config.local_endpoint, &peer, &data, relays)?;
+        let deadline = tokio::time::Instant::now() + config.startup_timeout;
+        join::discover_join_directory(&config, deadline).await?;
+        Self::start_validated(
+            ResolvedStartup::join(config),
+            peer,
+            data,
+            Some(relays.dispatch_tracker()),
+        )
+        .await
+    }
+
+    async fn start_validated(
+        config: ResolvedStartup,
+        peer: TcpListener,
+        data: TcpListener,
+        #[cfg(test)] tracker: Option<crate::rpc::test_support::DispatchTracker>,
+    ) -> Result<Self, NodeError> {
         let identity = PeerIdentity {
-            cluster_id: config.directory.cluster_id,
+            cluster_id: config.cluster_id,
             node_id: config.node_id,
         };
         info!("raft_node_start node={}", identity.node_id.get());
@@ -89,7 +163,7 @@ impl NodeRuntime {
             StorageIdentity {
                 cluster_id: identity.cluster_id,
                 node_id: identity.node_id,
-                shard_config: config.directory.shard_config,
+                shard_config: config.shard_config,
             },
             config.storage.clone(),
             config.open_mode,
@@ -101,12 +175,32 @@ impl NodeRuntime {
             identity.node_id.get(),
             groups.len()
         );
-        let service = Arc::new(NodeService::new(identity, config.directory.clone(), groups));
+        let service = Arc::new(NodeService::new(
+            identity,
+            config.shard_config,
+            config.bootstrap_origin.clone(),
+            config.storage.clone(),
+            config.peers,
+            groups,
+            config.metadata_seeds.clone(),
+        ));
         let peer_groups = service
             .groups
             .iter()
             .map(|(id, group)| (*id, group.raft.clone()))
             .collect();
+        #[cfg(test)]
+        let mut peer_server = match tracker {
+            Some(tracker) => PeerServer::start_with_dispatch_tracker(
+                peer,
+                identity,
+                peer_groups,
+                resources,
+                tracker,
+            ),
+            None => PeerServer::start(peer, identity, peer_groups, resources),
+        };
+        #[cfg(not(test))]
         let mut peer_server = PeerServer::start(peer, identity, peer_groups, resources);
         let data_server = match Server::start(data, config.server, Arc::clone(&service)) {
             Ok(server) => server,
@@ -149,16 +243,13 @@ impl NodeRuntime {
             {
                 continue;
             }
-            let voters = self
-                .config
-                .directory
+            let origin = self.config.origin()?;
+            let voters = origin
                 .voters(*id)
                 .ok_or_else(|| NodeError::Config("missing group placement".into()))?;
             let mut members = BTreeMap::new();
             for voter in voters {
-                let node = self
-                    .config
-                    .directory
+                let node = origin
                     .node(*voter)
                     .ok_or_else(|| NodeError::Config("unknown configured voter".into()))?;
                 members.insert(voter.get(), BasicNode::new(node.peer_address.to_string()));
@@ -180,7 +271,7 @@ impl NodeRuntime {
     fn require_initializer(&self) -> Result<(), NodeError> {
         let initializer = self
             .config
-            .directory
+            .origin()?
             .nodes
             .iter()
             .map(|node| node.node_id)
@@ -223,7 +314,9 @@ impl NodeRuntime {
         }
         info!("raft_node_stop node={}", self.config.node_id.get());
         self.data_server.stop_accepting();
+        self.service.movement.stop();
         stop_groups(&self.service.groups).await;
+        self.service.movement.drain().await;
         self.data_server.close().await;
         self.peer_server.close().await;
         #[cfg(feature = "diagnostics")]
@@ -272,13 +365,18 @@ fn observe_group_states(node: NodeId, service: &NodeService) -> tokio::task::Joi
 }
 
 async fn start_groups(
-    config: &NodeConfig,
+    config: &ResolvedStartup,
     storage: &Storage,
     identity: PeerIdentity,
     resources: &Arc<PeerResources>,
 ) -> Result<BTreeMap<GroupId, HostedGroup>, NodeError> {
     let mut groups = BTreeMap::new();
-    for index in 0..=u64::from(config.directory.shard_config.count()) {
+    let first = if config.bootstrap_origin.is_some() {
+        0
+    } else {
+        1
+    };
+    for index in first..=u64::from(config.shard_config.count()) {
         let id = GroupId::new(index);
         let result = start_group(config, storage, identity, resources, id).await;
         match result {
@@ -295,7 +393,7 @@ async fn start_groups(
 }
 
 async fn start_group(
-    config: &NodeConfig,
+    config: &ResolvedStartup,
     storage: &Storage,
     identity: PeerIdentity,
     resources: &Arc<PeerResources>,
@@ -328,4 +426,34 @@ async fn stop_groups(groups: &BTreeMap<GroupId, HostedGroup>) {
     for group in groups.values() {
         let _ = group.raft.shutdown().await;
     }
+}
+
+fn check_listeners(
+    endpoint: &rockbee_raft_protocol::routing::NodeEndpoint,
+    peer: &TcpListener,
+    data: &TcpListener,
+) -> Result<(), NodeError> {
+    if peer.local_addr()? != endpoint.peer_address || data.local_addr()? != endpoint.data_address {
+        return Err(NodeError::Config(
+            "listeners do not match advertised node addresses".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn check_relay_listeners(
+    endpoint: &rockbee_raft_protocol::routing::NodeEndpoint,
+    peer: &TcpListener,
+    data: &TcpListener,
+    relays: &crate::rpc::test_support::PeerRelays,
+) -> Result<(), NodeError> {
+    if data.local_addr()? != endpoint.data_address
+        || !relays.matches_binding(endpoint.node_id, endpoint.peer_address, peer.local_addr()?)
+    {
+        return Err(NodeError::Config(
+            "listeners do not match owned test relay mapping".into(),
+        ));
+    }
+    Ok(())
 }

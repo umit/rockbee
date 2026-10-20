@@ -178,6 +178,19 @@ impl PeerRequest {
             PeerRequestBody::AppendEntries(request) if request.entries.len() > 128 => {
                 Err(PeerError::Protocol("append entry count exceeds 128".into()))
             }
+            PeerRequestBody::AppendEntries(request) => {
+                // The outgoing network calls this gate before WireAppend
+                // clones payloads. Incoming DTO conversion repeats intrinsic
+                // command validation after bounded deserialization.
+                for entry in &request.entries {
+                    if let openraft::EntryPayload::Normal(command) = &entry.payload {
+                        command
+                            .validate()
+                            .map_err(|error| PeerError::Protocol(error.to_string()))?;
+                    }
+                }
+                Ok(())
+            }
             PeerRequestBody::InstallSnapshot(request)
                 if request.data.len() > snapshot_chunk_limit =>
             {
@@ -252,6 +265,40 @@ pub(crate) fn encode_request(
     encode_wire(&request.header, &wire, max_frame_bytes)
 }
 
+/// Counts the complete largest legal one-entry metadata append, and also
+/// covers the network adapter's conservative prefix admission before DTO copies.
+pub(crate) fn metadata_append_bytes(
+    command: &crate::control::MetadataCommand,
+) -> Result<usize, PeerError> {
+    command
+        .validate()
+        .map_err(|error| PeerError::Protocol(error.to_string()))?;
+    let log_id = openraft::LogId::new(
+        openraft::CommittedLeaderId::new(u64::MAX, u64::MAX),
+        u64::MAX,
+    );
+    let append = AppendEntriesRequest {
+        vote: openraft::Vote::new(u64::MAX, u64::MAX),
+        prev_log_id: Some(log_id),
+        entries: vec![crate::types::Entry {
+            log_id,
+            payload: openraft::EntryPayload::Normal(crate::types::Command::Metadata(Box::new(
+                command.clone(),
+            ))),
+        }],
+        leader_commit: Some(log_id),
+    };
+    let wire = WireRequestBody::AppendEntries(WireAppend::from(&append));
+    let actual = postcard::experimental::serialized_size(&wire)
+        .map_err(|error| PeerError::Protocol(error.to_string()))?
+        .checked_add(PEER_HEADER_BYTES)
+        .ok_or_else(|| PeerError::Protocol("metadata frame size overflow".into()))?;
+    let reserved = super::network::APPEND_ENVELOPE_RESERVATION
+        .checked_add(super::network::metadata_entry_reservation(command))
+        .ok_or_else(|| PeerError::Protocol("metadata append reservation overflow".into()))?;
+    Ok(actual.max(reserved))
+}
+
 pub(crate) fn encode_response(
     response: &PeerResponse,
     max_frame_bytes: usize,
@@ -285,7 +332,12 @@ fn encode_wire<T: Serialize>(
 }
 
 pub(crate) fn decode_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, PeerError> {
-    postcard::from_bytes(body).map_err(|error| PeerError::Protocol(error.to_string()))
+    let (value, remaining) =
+        postcard::take_from_bytes(body).map_err(|error| PeerError::Protocol(error.to_string()))?;
+    if !remaining.is_empty() {
+        return Err(PeerError::Protocol("trailing bytes in peer body".into()));
+    }
+    Ok(value)
 }
 
 pub(crate) fn decode_request_body(
@@ -331,6 +383,136 @@ mod tests {
         ClusterId::new([byte; 16]).expect("nonzero test cluster identity")
     }
 
+    fn metadata_test_directory() -> rockbee_raft_protocol::routing::ClusterDirectory {
+        let nodes = (1..=3)
+            .map(|id| rockbee_raft_protocol::routing::NodeEndpoint {
+                node_id: NodeId::new(id).expect("node"),
+                peer_address: format!("127.0.0.1:{}", 21000 + id * 2)
+                    .parse()
+                    .expect("peer"),
+                data_address: format!("127.0.0.1:{}", 21001 + id * 2)
+                    .parse()
+                    .expect("data"),
+            })
+            .collect();
+        rockbee_raft_protocol::routing::ClusterDirectory::initial(
+            identity(1),
+            rockbee_raft_protocol::ShardConfig::new(256, u64::MAX).expect("shards"),
+            nodes,
+        )
+        .expect("directory")
+    }
+
+    fn metadata_test_request(command: crate::control::MetadataCommand) -> PeerRequest {
+        let mut header = header(PeerKind::AppendEntries);
+        header.group_id = GroupId::new(0);
+        PeerRequest {
+            header,
+            body: PeerRequestBody::AppendEntries(AppendEntriesRequest {
+                vote: Vote::new(3, 1),
+                prev_log_id: None,
+                entries: vec![Entry {
+                    log_id: LogId::new(CommittedLeaderId::new(3, 1), 99),
+                    payload: EntryPayload::Normal(Command::Metadata(Box::new(command))),
+                }],
+                leader_commit: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn metadata_private_append_preserves_every_command_and_full_membership_identity() {
+        use crate::control::{MembershipObservation, MetadataCommand};
+        use rockbee_raft_protocol::control::{CommittedLogPosition, MoveJobId, MoveReplica};
+        let directory = metadata_test_directory();
+        let intent = MoveReplica {
+            job_id: MoveJobId::new([u8::MAX; 16]).expect("job"),
+            data_group: GroupId::new(256),
+            remove_node: NodeId::new(3).expect("old voter"),
+            add_node: rockbee_raft_protocol::routing::NodeEndpoint {
+                node_id: NodeId::new(4).expect("new voter"),
+                peer_address: "[feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535"
+                    .parse()
+                    .expect("peer"),
+                data_address: "[feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65534"
+                    .parse()
+                    .expect("data"),
+            },
+            expected_directory_revision: 1,
+        }
+        .derive_intent(&directory)
+        .expect("intent");
+        let commands = [
+            MetadataCommand::InitializeDirectoryIfAbsent {
+                initial_directory: directory,
+            },
+            MetadataCommand::BeginMove {
+                intent: intent.clone(),
+            },
+            MetadataCommand::CompleteMove {
+                expected_directory_revision: u64::MAX,
+                data_group: intent.data_group,
+                job_id: intent.job_id,
+                observation: MembershipObservation {
+                    uniform: true,
+                    voters: intent.target_voters,
+                    replacement_endpoint: intent.add_node,
+                    membership: CommittedLogPosition {
+                        term: u64::MAX,
+                        leader_node_id: NodeId::new(u64::MAX).expect("leader"),
+                        index: u64::MAX,
+                    },
+                },
+            },
+        ];
+        for command in commands {
+            let request = metadata_test_request(command.clone());
+            request
+                .validate_shape(256 * 1024)
+                .expect("valid command shape");
+            let frame = encode_request(&request, rockbee_raft_protocol::MAX_FRAME_PAYLOAD)
+                .expect("encode metadata");
+            let decoded =
+                decode_request_body(PeerKind::AppendEntries, &frame[4 + PEER_HEADER_BYTES..])
+                    .expect("decode metadata");
+            let PeerRequestBody::AppendEntries(decoded) = decoded else {
+                panic!("append expected")
+            };
+            assert_eq!(
+                decoded.entries[0].log_id,
+                LogId::new(CommittedLeaderId::new(3, 1), 99)
+            );
+            assert_eq!(
+                decoded.entries[0].payload,
+                EntryPayload::Normal(Command::Metadata(Box::new(command)))
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_outgoing_shape_is_rejected_before_dto_conversion() {
+        let mut directory = metadata_test_directory();
+        directory.nodes.truncate(1);
+        for placement in &mut directory.placements {
+            placement.voters.truncate(1);
+        }
+        directory
+            .validate()
+            .expect("generic directory remains valid");
+        let command = crate::control::MetadataCommand::InitializeDirectoryIfAbsent {
+            initial_directory: directory,
+        };
+        assert!(
+            command.validate().is_err(),
+            "intrinsically invalid bootstrap"
+        );
+        let request = metadata_test_request(command);
+        assert!(
+            request.validate_shape(256 * 1024).is_err(),
+            "the outgoing network shape gate runs before cloning a WireAppend"
+        );
+    }
+
     fn header(kind: PeerKind) -> PeerHeader {
         PeerHeader::request(
             identity(1),
@@ -362,6 +544,60 @@ mod tests {
             .validate_for_receiver(identity(1), NodeId::new(2).expect("test node id"))
             .expect("receiver identity matches");
         decoded.validate_shape(256 * 1024).expect("matching kind");
+    }
+
+    #[test]
+    fn metadata_append_round_trip_rejects_trailing_declared_body_bytes() {
+        let nodes = (1..=3)
+            .map(|id| rockbee_raft_protocol::routing::NodeEndpoint {
+                node_id: NodeId::new(id).expect("node"),
+                peer_address: format!("127.0.0.1:{}", 10000 + id * 2)
+                    .parse()
+                    .expect("peer"),
+                data_address: format!("127.0.0.1:{}", 10001 + id * 2)
+                    .parse()
+                    .expect("data"),
+            })
+            .collect();
+        let directory = rockbee_raft_protocol::routing::ClusterDirectory::initial(
+            identity(1),
+            rockbee_raft_protocol::ShardConfig::new(256, u64::MAX).expect("shards"),
+            nodes,
+        )
+        .expect("directory");
+        let command = Command::Metadata(Box::new(
+            crate::control::MetadataCommand::InitializeDirectoryIfAbsent {
+                initial_directory: directory,
+            },
+        ));
+        let mut header = header(PeerKind::AppendEntries);
+        header.group_id = GroupId::new(0);
+        let request = PeerRequest {
+            header,
+            body: PeerRequestBody::AppendEntries(AppendEntriesRequest {
+                vote: Vote::new(3, 1),
+                prev_log_id: None,
+                entries: vec![Entry {
+                    log_id: LogId::new(CommittedLeaderId::new(3, 1), 1),
+                    payload: EntryPayload::Normal(command.clone()),
+                }],
+                leader_commit: None,
+            }),
+        };
+        let frame = encode_request(&request, rockbee_raft_protocol::MAX_FRAME_PAYLOAD)
+            .expect("metadata frame");
+        let body = &frame[4 + PEER_HEADER_BYTES..];
+        let decoded = decode_request_body(PeerKind::AppendEntries, body).expect("metadata decode");
+        let PeerRequestBody::AppendEntries(decoded) = decoded else {
+            panic!("append expected")
+        };
+        assert_eq!(decoded.entries[0].payload, EntryPayload::Normal(command));
+        let mut trailing = body.to_vec();
+        trailing.push(0);
+        assert!(
+            decode_request_body(PeerKind::AppendEntries, &trailing).is_err(),
+            "a declared frame body must consume exactly one bounded request"
+        );
     }
 
     #[test]

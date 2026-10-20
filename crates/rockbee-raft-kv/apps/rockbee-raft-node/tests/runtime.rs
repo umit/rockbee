@@ -7,7 +7,7 @@ use rockbee_raft_gateway::{GatewayConfig, GatewayRuntime, SeedNode};
 use rockbee_raft_node::{cluster::NodeRuntime, config::NodeConfig, storage::OpenMode};
 use rockbee_raft_protocol::{
     ClusterId, GroupId, KvRequest, KvResponse, MutationOutcome, NodeId, ShardConfig,
-    backend::{BackendOperation, BackendReply, BackendRequest, BackendResponse},
+    backend::{BackendOperation, BackendReply, BackendRequest, BackendResponse, BootstrapOutcome},
     routing::{ClusterDirectory, NodeEndpoint},
     transport::server::ServerConfig,
     transport::{Link, LinkConfig},
@@ -260,7 +260,7 @@ async fn four_groups_replicate_and_committed_values_survive_leader_stop_and_rest
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn immutable_directory_is_durably_bootstrapped_and_equal_retry_does_not_write() {
+async fn conditional_directory_retry_verifies_origin_through_a_new_applied_entry() {
     let cluster = Cluster::start().await;
     cluster.nodes[0]
         .as_ref()
@@ -281,16 +281,92 @@ async fn immutable_directory_is_durably_bootstrapped_and_equal_retry_does_not_wr
         cluster
             .request(leader, BackendOperation::BootstrapDirectory)
             .await,
-        BackendReply::Bootstrap(MutationOutcome::Committed),
+        BackendReply::Bootstrap(BootstrapOutcome::Ready {
+            revision: std::num::NonZeroU64::new(1).unwrap(),
+        }),
     );
-    assert_eq!(
+    assert!(
         cluster.nodes[leader]
             .as_ref()
             .unwrap()
-            .applied_index(GroupId::new(0)),
-        applied_before
+            .applied_index(GroupId::new(0))
+            > applied_before,
+        "a matching directory must still submit conditional initialization"
     );
     cluster.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn conditional_bootstrap_persists_origin_after_reopen() {
+    use rockbee_raft_node::{
+        control::{DIRECTORY_KEY, ORIGIN_KEY},
+        storage::{Storage, StorageIdentity, StorageOptions},
+    };
+
+    let mut cluster = Cluster::start().await;
+    cluster.nodes[0]
+        .as_ref()
+        .unwrap()
+        .bootstrap_directory(deadline())
+        .await
+        .unwrap();
+    let leader = cluster.leader(GroupId::new(0)).await;
+    let required = cluster.nodes[leader]
+        .as_ref()
+        .unwrap()
+        .applied_index(GroupId::new(0))
+        .unwrap();
+    timeout(Duration::from_secs(15), async {
+        loop {
+            if cluster.nodes.iter().flatten().all(|node| {
+                node.applied_index(GroupId::new(0))
+                    .is_some_and(|index| index >= required)
+            }) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("every metadata replica must eventually apply bootstrap");
+    for link in &cluster.links {
+        link.close().await;
+    }
+    for slot in &mut cluster.nodes {
+        let mut node = slot.take().unwrap();
+        node.close().await;
+    }
+    for (index, root) in cluster.roots.iter().enumerate() {
+        let storage = Storage::open(
+            root.path().join("db"),
+            StorageIdentity {
+                cluster_id: cluster.directory.cluster_id,
+                node_id: cluster.directory.nodes[index].node_id,
+                shard_config: cluster.directory.shard_config,
+            },
+            StorageOptions::default(),
+            OpenMode::OpenExisting,
+        )
+        .await
+        .unwrap();
+        let group = storage.open_group(GroupId::new(0)).unwrap();
+        for key in [DIRECTORY_KEY, ORIGIN_KEY] {
+            let value = group
+                .state_machine
+                .reader()
+                .read_local(Bytes::from_static(key))
+                .await
+                .unwrap()
+                .value;
+            assert!(
+                value.is_some(),
+                "bootstrap must durably persist current and immutable origin on node {index}"
+            );
+            let actual: ClusterDirectory =
+                rockbee_raft_protocol::decode_frame(value.as_ref().unwrap()).unwrap();
+            assert_eq!(actual, cluster.directory);
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -129,6 +129,7 @@ pub(crate) enum WireCommand {
     Delete {
         key: BoundedVec<u8, 65536>,
     },
+    Metadata(Box<crate::control::MetadataCommand>),
 }
 impl From<&Command> for WireCommand {
     fn from(value: &Command) -> Self {
@@ -140,6 +141,7 @@ impl From<&Command> for WireCommand {
             Command::Delete { key } => Self::Delete {
                 key: BoundedVec(key.to_vec()),
             },
+            Command::Metadata(command) => Self::Metadata(command.clone()),
         }
     }
 }
@@ -154,6 +156,7 @@ impl TryFrom<WireCommand> for Command {
             WireCommand::Delete { key } => Command::Delete {
                 key: Bytes::from(key.0),
             },
+            WireCommand::Metadata(command) => Command::Metadata(command),
         };
         command
             .validate()
@@ -421,7 +424,62 @@ mod tests {
         raft::AppendEntriesRequest, storage::SnapshotMeta,
     };
 
-    use super::{BoundedVec, WireAppend, WireSnapshot, WireVoteRequest};
+    use super::{BoundedVec, WireAppend, WireCommand, WireSnapshot, WireVoteRequest};
+
+    #[test]
+    fn metadata_nested_directory_counts_and_intrinsic_shape_are_rejected() {
+        use crate::control::MetadataCommand;
+        use rockbee_raft_protocol::{
+            ClusterId, NodeId, ShardConfig,
+            routing::{ClusterDirectory, NodeEndpoint},
+        };
+        for corruption in 0..4 {
+            let nodes = (1..=3)
+                .map(|id| NodeEndpoint {
+                    node_id: NodeId::new(id).expect("node"),
+                    peer_address: format!("127.0.0.1:{}", 22000 + id * 2)
+                        .parse()
+                        .expect("peer"),
+                    data_address: format!("127.0.0.1:{}", 22001 + id * 2)
+                        .parse()
+                        .expect("data"),
+                })
+                .collect();
+            let mut directory = ClusterDirectory::initial(
+                ClusterId::new([1; 16]).expect("cluster"),
+                ShardConfig::new(256, 0).expect("shards"),
+                nodes,
+            )
+            .expect("directory");
+            match corruption {
+                0 => directory.nodes = (0..17).map(|_| directory.nodes[0].clone()).collect(),
+                1 => directory.placements.push(directory.placements[0].clone()),
+                2 => directory.placements[0].voters = vec![NodeId::new(1).expect("node"); 17],
+                _ => {
+                    directory.nodes.truncate(1);
+                    for placement in &mut directory.placements {
+                        placement.voters.truncate(1);
+                    }
+                }
+            }
+            // Bypass the trusted sender to exercise the decoder against a
+            // malformed peer; collection counts are refused during decode.
+            let wire =
+                WireCommand::Metadata(Box::new(MetadataCommand::InitializeDirectoryIfAbsent {
+                    initial_directory: directory,
+                }));
+            let bytes = postcard::to_stdvec(&wire).expect("encode malicious fixture");
+            let decoded = postcard::from_bytes::<WireCommand>(&bytes);
+            if corruption < 3 {
+                assert!(decoded.is_err());
+            } else {
+                assert!(
+                    crate::types::Command::try_from(decoded.expect("bounded shape decodes"))
+                        .is_err()
+                );
+            }
+        }
+    }
 
     fn log_id(term: u64, leader_node_id: u64, index: u64) -> openraft::LogId<u64> {
         openraft::LogId::new(

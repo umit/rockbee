@@ -362,12 +362,20 @@ impl RaftNetwork<TypeConfig> for PeerNetwork {
     }
 }
 
-/// Computes an allocation-free upper bound before DTO conversion. The bound is
-/// deliberately pessimistic about postcard tags/varints; that may split a batch
-/// early, but it never builds a multi-megabyte peer frame just to discover it is
-/// too large. One legal maximum command remains below the two-megabyte frame cap.
+/// Covers the fixed peer header, vote, optional positions and envelope tags.
+pub(super) const APPEND_ENVELOPE_RESERVATION: usize = 128;
+/// Covers full-width assigned LogId, payload/command tags and collection lengths.
+const METADATA_ENTRY_RESERVATION: usize = 128;
+
+pub(super) fn metadata_entry_reservation(command: &crate::control::MetadataCommand) -> usize {
+    rockbee_raft_protocol::encoded_payload_size(command)
+        .unwrap_or(usize::MAX)
+        .saturating_add(METADATA_ENTRY_RESERVATION)
+}
+
+/// Counts conservatively before DTO conversion, splitting before frame copies.
 fn fitting_append_prefix(request: &AppendEntriesRequest<TypeConfig>, frame_limit: usize) -> usize {
-    let mut total = 128_usize; // fixed peer header plus vote/options/envelope tags.
+    let mut total = APPEND_ENVELOPE_RESERVATION;
     let mut fitting = 0;
     for entry in &request.entries {
         let entry_bytes = match &entry.payload {
@@ -377,6 +385,7 @@ fn fitting_append_prefix(request: &AppendEntriesRequest<TypeConfig>, frame_limit
                     key.len().saturating_add(value.len()).saturating_add(128)
                 }
                 crate::types::Command::Delete { key } => key.len().saturating_add(96),
+                crate::types::Command::Metadata(command) => metadata_entry_reservation(command),
             },
             EntryPayload::Membership(membership) => {
                 let configs = membership
@@ -465,6 +474,102 @@ mod tests {
             fitting_append_prefix(&request, rockbee_raft_protocol::MAX_FRAME_PAYLOAD),
             1
         );
+    }
+
+    #[test]
+    fn metadata_maximum_shape_prefix_fits_its_actual_private_frame() {
+        use crate::{control::MetadataCommand, types::Command};
+        use rockbee_raft_protocol::{
+            ClusterId, ShardConfig,
+            routing::{ClusterDirectory, NodeEndpoint},
+        };
+        let nodes = (1u16..=3)
+            .map(|offset| NodeEndpoint {
+                node_id: NodeId::new(u64::MAX - u64::from(offset)).expect("node"),
+                peer_address: std::net::SocketAddr::new(
+                    std::net::Ipv6Addr::from(u128::MAX - (1u128 << 120) - u128::from(offset))
+                        .into(),
+                    u16::MAX - offset * 2,
+                ),
+                data_address: std::net::SocketAddr::new(
+                    std::net::Ipv6Addr::from(u128::MAX - (1u128 << 120) - u128::from(offset))
+                        .into(),
+                    u16::MAX - offset * 2 - 1,
+                ),
+            })
+            .collect();
+        let directory = ClusterDirectory::initial(
+            ClusterId::new([u8::MAX; 16]).expect("cluster"),
+            ShardConfig::new(256, u64::MAX).expect("shards"),
+            nodes,
+        )
+        .expect("maximum bootstrap");
+        let command = Command::Metadata(Box::new(MetadataCommand::InitializeDirectoryIfAbsent {
+            initial_directory: directory,
+        }));
+        let log_id = LogId::new(CommittedLeaderId::new(u64::MAX, u64::MAX), u64::MAX);
+        let request: AppendEntriesRequest<TypeConfig> = AppendEntriesRequest {
+            vote: Vote::new(u64::MAX, u64::MAX),
+            prev_log_id: Some(log_id),
+            entries: (0..128)
+                .map(|_| Entry {
+                    log_id,
+                    payload: EntryPayload::Normal(command.clone()),
+                })
+                .collect(),
+            leader_commit: Some(log_id),
+        };
+        let Command::Metadata(metadata) = &command else {
+            unreachable!("fixture is metadata");
+        };
+        let admitted = super::super::message::metadata_append_bytes(metadata)
+            .expect("count complete worst append envelope");
+        let single = AppendEntriesRequest {
+            vote: request.vote,
+            prev_log_id: request.prev_log_id,
+            entries: vec![request.entries[0].clone()],
+            leader_commit: request.leader_commit,
+        };
+        assert_eq!(fitting_append_prefix(&single, admitted), 1);
+        assert_eq!(fitting_append_prefix(&single, admitted - 1), 0);
+        let single_frame = encode_request(
+            &PeerRequest {
+                header: PeerHeader::request(
+                    test_identity(1).cluster_id,
+                    NodeId::new(1).expect("source"),
+                    NodeId::new(2).expect("target"),
+                    GroupId::new(0),
+                    PeerKind::AppendEntries,
+                ),
+                body: PeerRequestBody::AppendEntries(single),
+            },
+            admitted,
+        )
+        .expect("full-width optional positions and body fit shared admission");
+        assert!(single_frame.len() <= admitted + 4);
+        let limit = 32 * 1024;
+        let fitting = fitting_append_prefix(&request, limit);
+        assert!(fitting > 0 && fitting < request.entries.len());
+        let selected = AppendEntriesRequest {
+            entries: request.entries[..fitting].to_vec(),
+            ..request
+        };
+        let header = PeerHeader::request(
+            test_identity(1).cluster_id,
+            NodeId::new(1).expect("source"),
+            NodeId::new(2).expect("target"),
+            GroupId::new(0),
+            PeerKind::AppendEntries,
+        );
+        let frame = encode_request(
+            &PeerRequest {
+                header,
+                body: PeerRequestBody::AppendEntries(selected),
+            },
+            limit,
+        )
+        .expect("chosen prefix fits real DTO frame");
+        assert!(frame.len() <= limit + 4);
     }
 
     #[test]

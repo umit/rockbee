@@ -5,6 +5,7 @@
 
 pub mod cluster;
 pub mod config;
+pub mod control;
 #[doc(hidden)]
 pub mod diagnostics;
 pub mod raft;

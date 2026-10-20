@@ -28,6 +28,11 @@ pub struct StateRead {
     pub value: Option<Bytes>,
 }
 
+pub(crate) struct MetadataRead {
+    pub applied: Option<LogId>,
+    pub view: crate::control::MetadataView,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct StateRecord {
     pub generation: u64,
@@ -44,6 +49,63 @@ impl StateMachine {
 }
 
 impl StateReader {
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    pub(crate) fn pause_next_joint_apply_return(
+        &self,
+        expected: Vec<std::collections::BTreeSet<u64>>,
+    ) -> Arc<super::JointApplyPause> {
+        assert_eq!(
+            expected.len(),
+            2,
+            "pause requires one exact joint configuration"
+        );
+        let pause = Arc::new(super::JointApplyPause::new(expected));
+        let mut slot = self.group.joint_apply_pause.lock().unwrap();
+        assert!(
+            slot.is_none(),
+            "one pause may be armed per actual group instance"
+        );
+        *slot = Some(Arc::clone(&pause));
+        pause
+    }
+
+    /// Applied identity and membership from one coherent native snapshot.
+    /// Callers establish current group authority before trusting this local state.
+    pub(crate) async fn read_membership(
+        &self,
+    ) -> Result<(Option<LogId>, StoredMembership), StoreError> {
+        self.group
+            .read(ErrorSubject::StateMachine, |group| {
+                let state = read_record(group, &group.shared.db.snapshot())?;
+                Ok((state.applied, state.membership))
+            })
+            .await
+    }
+
+    /// Reads identity and the bounded validated metadata view from one snapshot.
+    /// The caller must establish fresh group-zero authority before using it.
+    pub(crate) async fn read_metadata(&self) -> Result<MetadataRead, StoreError> {
+        self.group
+            .read(ErrorSubject::StateMachine, |group| {
+                if group.id != 0 {
+                    return Err(error(
+                        ErrorSubject::StateMachine,
+                        ErrorVerb::Read,
+                        "metadata reads require group zero",
+                    ));
+                }
+                let snapshot = group.shared.db.snapshot();
+                let state = read_record(group, &snapshot)?;
+                let view = super::metadata::load_view(group, &snapshot, state.generation)?;
+                Ok(MetadataRead {
+                    applied: state.applied,
+                    view,
+                })
+            })
+            .await
+    }
+
     /// Returns a coherent local view. A Raft authority barrier is required for strong GETs.
     pub async fn read_local(&self, key: Bytes) -> Result<StateRead, StoreError> {
         if key.is_empty() || key.len() > rockbee_raft_protocol::MAX_KEY_BYTES {
@@ -109,8 +171,7 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
             let Some(chunk) = chunks.next(&self.group.shared.options, metadata)? else {
                 break;
             };
-            let count = chunk.len();
-            state = self
+            let (next_state, results) = self
                 .group
                 .write(
                     &session,
@@ -119,9 +180,12 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
                     move |group| apply_chunk(group, state, chunk),
                 )
                 .await?;
-            responses.extend(std::iter::repeat_n(ApplyResult::Applied, count));
+            state = next_state;
+            responses.extend(results);
         }
         session.complete();
+        #[cfg(test)]
+        super::joint_apply_pause::after_apply(&self.group, &state).await;
         Ok(responses)
     }
 
@@ -190,9 +254,25 @@ fn apply_chunk(
     group: &Group,
     mut state: StateRecord,
     entries: Vec<super::PreparedEntry>,
-) -> Result<StateRecord, StoreError> {
+) -> Result<(StateRecord, Vec<ApplyResult>), StoreError> {
+    if entries.len() == 1
+        && matches!(
+            &entries[0].entry.payload,
+            EntryPayload::Normal(Command::Metadata(_))
+        )
+    {
+        let prepared = entries.into_iter().next().ok_or_else(|| {
+            error(
+                ErrorSubject::StateMachine,
+                ErrorVerb::Write,
+                "missing standalone metadata entry",
+            )
+        })?;
+        return super::metadata::apply(group, state, prepared);
+    }
     let cf = group.cf("state")?;
     let mut batch = WriteBatch::default();
+    let mut results = Vec::with_capacity(entries.len());
     for prepared in entries {
         let entry = prepared.entry;
         if state
@@ -216,8 +296,16 @@ fn apply_chunk(
             EntryPayload::Normal(Command::Delete { key }) => {
                 batch.delete_cf(cf, keys::data(group.id, state.generation, &key))
             }
+            EntryPayload::Normal(Command::Metadata(_)) => {
+                return Err(error(
+                    ErrorSubject::StateMachine,
+                    ErrorVerb::Write,
+                    "metadata entry must occupy its own apply chunk",
+                ));
+            }
         }
         state.applied = Some(entry.log_id);
+        results.push(ApplyResult::Applied);
     }
     batch.put_cf(
         cf,
@@ -225,5 +313,5 @@ fn apply_chunk(
         encode(&state, ErrorSubject::StateMachine)?,
     );
     group.persist(batch, ErrorSubject::StateMachine)?;
-    Ok(state)
+    Ok((state, results))
 }

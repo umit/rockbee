@@ -451,3 +451,495 @@ async fn gateway_never_replays_unknown_mutation_and_reconnects_for_later_read() 
     gateway.close().await;
     backend_server.close().await;
 }
+
+struct RefreshState {
+    directory: std::sync::RwLock<ClusterDirectory>,
+    directories: AtomicUsize,
+    mutations: AtomicUsize,
+    first_metadata_delay_ms: AtomicUsize,
+    hold_mutation: std::sync::atomic::AtomicBool,
+    mutation_started: tokio::sync::Notify,
+    release_mutation: tokio::sync::Notify,
+    metadata_unavailable: std::sync::atomic::AtomicBool,
+    uncertain_mutation: std::sync::atomic::AtomicBool,
+    d_unavailable: std::sync::atomic::AtomicBool,
+    missing_read: std::sync::atomic::AtomicBool,
+}
+
+struct RefreshBackend(Arc<RefreshState>);
+
+impl RequestHandler for RefreshBackend {
+    type Request = BackendRequest;
+    type Response = BackendResponse;
+
+    fn handle(
+        &self,
+        request: BackendRequest,
+        _deadline: Instant,
+    ) -> impl Future<Output = BackendResponse> + Send {
+        let state = Arc::clone(&self.0);
+        async move {
+            let failure = || rockbee_raft_protocol::Failure {
+                reason: rockbee_raft_protocol::FailureReason::NotLeader,
+                message: "moved group".to_owned(),
+            };
+            let reply = match request.operation {
+                BackendOperation::Directory => {
+                    state.directories.fetch_add(1, Ordering::SeqCst);
+                    if request.target_node.get() == 1 {
+                        let millis = state.first_metadata_delay_ms.load(Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(u64::try_from(millis).unwrap()))
+                            .await;
+                    }
+                    if state.metadata_unavailable.load(Ordering::SeqCst) {
+                        BackendReply::Directory(Err(rockbee_raft_protocol::ReadFailure::new(
+                            failure(),
+                        )))
+                    } else {
+                        BackendReply::Directory(Ok(state.directory.read().unwrap().clone()))
+                    }
+                }
+                BackendOperation::Kv {
+                    request: operation, ..
+                } => {
+                    let response = if state.missing_read.load(Ordering::SeqCst)
+                        && matches!(operation, rockbee_raft_protocol::KvRequest::Get { .. })
+                    {
+                        KvResponse::Value(None)
+                    } else if request.target_node.get() == 1
+                        && state.hold_mutation.load(Ordering::SeqCst)
+                        && !matches!(operation, rockbee_raft_protocol::KvRequest::Get { .. })
+                    {
+                        state.mutations.fetch_add(1, Ordering::SeqCst);
+                        state.mutation_started.notify_one();
+                        state.release_mutation.notified().await;
+                        KvResponse::Mutation(MutationOutcome::Committed)
+                    } else if state.uncertain_mutation.load(Ordering::SeqCst)
+                        && !matches!(operation, rockbee_raft_protocol::KvRequest::Get { .. })
+                    {
+                        state.mutations.fetch_add(1, Ordering::SeqCst);
+                        KvResponse::Mutation(MutationOutcome::Unknown(
+                            rockbee_raft_protocol::Failure {
+                                reason: rockbee_raft_protocol::FailureReason::Unavailable,
+                                message: "fixture lost mutation result".to_owned(),
+                            },
+                        ))
+                    } else if request.target_node.get() == 4
+                        && !state.d_unavailable.load(Ordering::SeqCst)
+                    {
+                        match operation {
+                            rockbee_raft_protocol::KvRequest::Get { .. } => {
+                                KvResponse::Value(Some(Bytes::from_static(b"from D")))
+                            }
+                            _ => {
+                                state.mutations.fetch_add(1, Ordering::SeqCst);
+                                KvResponse::Mutation(MutationOutcome::Committed)
+                            }
+                        }
+                    } else {
+                        match operation {
+                            rockbee_raft_protocol::KvRequest::Get { .. } => KvResponse::ReadError(
+                                rockbee_raft_protocol::ReadFailure::new(failure()),
+                            ),
+                            _ => KvResponse::Mutation(MutationOutcome::Rejected(failure())),
+                        }
+                    };
+                    // Deliberately advertises D before it is in the catalog.
+                    BackendReply::Kv {
+                        response,
+                        leader_hint: Some(NodeId::new(4).unwrap()),
+                    }
+                }
+                _ => BackendReply::Leader {
+                    group_id: GroupId::new(0),
+                    leader: None,
+                },
+            };
+            BackendResponse {
+                cluster_id: request.cluster_id,
+                node_id: request.target_node,
+                reply,
+            }
+        }
+    }
+}
+
+struct RefreshFixture {
+    gateway: GatewayRuntime,
+    client: RockBeeRaftClient,
+    state: Arc<RefreshState>,
+    initial: ClusterDirectory,
+    updated: ClusterDirectory,
+    servers: Vec<Server>,
+    _peers: Vec<TcpListener>,
+}
+
+impl RefreshFixture {
+    async fn start() -> Self {
+        let mut listeners = Vec::new();
+        let mut peers = Vec::new();
+        for _ in 0..4 {
+            listeners.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
+            peers.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
+        }
+        let nodes: Vec<_> = (0..4)
+            .map(|index| NodeEndpoint {
+                node_id: NodeId::new(u64::try_from(index + 1).unwrap()).unwrap(),
+                peer_address: peers[index].local_addr().unwrap(),
+                data_address: listeners[index].local_addr().unwrap(),
+            })
+            .collect();
+        let cluster_id = ClusterId::new([11; 16]).unwrap();
+        let shard_config = ShardConfig::new(1, 0).unwrap();
+        let initial =
+            ClusterDirectory::initial(cluster_id, shard_config, nodes[..3].to_vec()).unwrap();
+        let state = Arc::new(RefreshState {
+            directory: std::sync::RwLock::new(initial.clone()),
+            directories: AtomicUsize::new(0),
+            mutations: AtomicUsize::new(0),
+            first_metadata_delay_ms: AtomicUsize::new(0),
+            hold_mutation: std::sync::atomic::AtomicBool::new(false),
+            mutation_started: tokio::sync::Notify::new(),
+            release_mutation: tokio::sync::Notify::new(),
+            metadata_unavailable: std::sync::atomic::AtomicBool::new(false),
+            uncertain_mutation: std::sync::atomic::AtomicBool::new(false),
+            d_unavailable: std::sync::atomic::AtomicBool::new(false),
+            missing_read: std::sync::atomic::AtomicBool::new(false),
+        });
+        let mut servers = Vec::new();
+        for listener in listeners {
+            servers.push(
+                Server::start(
+                    listener,
+                    ServerConfig::default(),
+                    Arc::new(RefreshBackend(Arc::clone(&state))),
+                )
+                .unwrap(),
+            );
+        }
+        let public_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let public_address = public_listener.local_addr().unwrap();
+        let gateway = GatewayRuntime::start_with_listener(
+            GatewayConfig {
+                cluster_id,
+                expected_shard_config: shard_config,
+                seeds: vec![SeedNode {
+                    node_id: nodes[0].node_id,
+                    address: nodes[0].data_address,
+                }],
+                listen_address: public_address,
+                backend_link: LinkConfig::default(),
+                server: ServerConfig::default(),
+                startup_timeout: Duration::from_secs(5),
+            },
+            public_listener,
+        )
+        .await
+        .unwrap();
+        let mut updated = initial.clone();
+        updated.revision = 2;
+        updated.nodes.push(nodes[3].clone());
+        updated.placements[1].voters = vec![nodes[0].node_id, nodes[1].node_id, nodes[3].node_id];
+        updated.validate().unwrap();
+        let client = RockBeeRaftClient::connect(public_address, ClientConfig::default())
+            .await
+            .unwrap();
+        Self {
+            gateway,
+            client,
+            state,
+            initial,
+            updated,
+            servers,
+            _peers: peers,
+        }
+    }
+
+    fn publish(&self, directory: ClusterDirectory) {
+        *self.state.directory.write().unwrap() = directory;
+    }
+
+    async fn close(&mut self) {
+        self.client.close().await;
+        self.gateway.close().await;
+        for server in &mut self.servers {
+            server.close().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn running_gateway_refreshes_published_placement_and_routes_to_d() {
+    let mut fixture = RefreshFixture::start().await;
+    fixture.publish(fixture.updated.clone());
+    assert_eq!(
+        fixture
+            .client
+            .get(Bytes::from_static(b"moved"))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"from D"))
+    );
+    assert_eq!(
+        fixture
+            .client
+            .put(Bytes::from_static(b"moved"), Bytes::new())
+            .unwrap()
+            .await,
+        MutationOutcome::Committed
+    );
+    assert_eq!(
+        fixture
+            .client
+            .delete(Bytes::from_static(b"moved"))
+            .unwrap()
+            .await,
+        MutationOutcome::Committed
+    );
+    assert_eq!(fixture.state.mutations.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.state.directories.load(Ordering::SeqCst), 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn gateway_refresh_coalesces_unchanged_and_failed_metadata_attempts() {
+    let mut fixture = RefreshFixture::start().await;
+    fixture
+        .state
+        .first_metadata_delay_ms
+        .store(40, Ordering::SeqCst);
+    for unavailable in [false, true] {
+        fixture
+            .state
+            .metadata_unavailable
+            .store(unavailable, Ordering::SeqCst);
+        let before = fixture.state.directories.load(Ordering::SeqCst);
+        let gateway = fixture.gateway.gateway();
+        let request = rockbee_raft_protocol::KvRequest::Get {
+            key: Bytes::from_static(b"moved"),
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let results = tokio::join!(
+            gateway.handle(request.clone(), deadline),
+            gateway.handle(request.clone(), deadline),
+            gateway.handle(request.clone(), deadline),
+            gateway.handle(request, deadline)
+        );
+        for result in [results.0, results.1, results.2, results.3] {
+            assert!(matches!(result, KvResponse::ReadError(_)));
+        }
+        let expected = if unavailable { 3 } else { 1 };
+        assert_eq!(
+            fixture.state.directories.load(Ordering::SeqCst) - before,
+            expected
+        );
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn gateway_metadata_candidates_share_the_original_deadline() {
+    let mut fixture = RefreshFixture::start().await;
+    fixture.publish(fixture.updated.clone());
+    fixture
+        .state
+        .first_metadata_delay_ms
+        .store(600, Ordering::SeqCst);
+    let started = Instant::now();
+    let result = fixture
+        .gateway
+        .gateway()
+        .handle(
+            rockbee_raft_protocol::KvRequest::Get {
+                key: Bytes::from_static(b"moved"),
+            },
+            started + Duration::from_millis(400),
+        )
+        .await;
+    assert_eq!(
+        result,
+        KvResponse::Value(Some(Bytes::from_static(b"from D")))
+    );
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(fixture.state.directories.load(Ordering::SeqCst) >= 3);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn gateway_equal_revision_conflict_fails_closed_and_older_directory_cannot_regress() {
+    let mut fixture = RefreshFixture::start().await;
+    let mut conflicting = fixture.updated.clone();
+    conflicting.revision = 1;
+    fixture.publish(conflicting);
+    assert!(
+        fixture
+            .client
+            .get(Bytes::from_static(b"moved"))
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.state.mutations.load(Ordering::SeqCst), 0);
+    fixture.publish(fixture.updated.clone());
+    assert_eq!(
+        fixture
+            .client
+            .get(Bytes::from_static(b"moved"))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"from D"))
+    );
+    fixture.publish(fixture.initial.clone());
+    fixture.state.d_unavailable.store(true, Ordering::SeqCst);
+    assert!(
+        fixture
+            .client
+            .get(Bytes::from_static(b"moved"))
+            .await
+            .is_err()
+    );
+    fixture.state.d_unavailable.store(false, Ordering::SeqCst);
+    assert_eq!(
+        fixture
+            .client
+            .get(Bytes::from_static(b"moved"))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"from D"))
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn gateway_published_directory_never_replays_an_uncertain_mutation_or_refreshes_final_absence()
+ {
+    let mut fixture = RefreshFixture::start().await;
+    fixture.publish(fixture.updated.clone());
+    fixture
+        .state
+        .uncertain_mutation
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(
+        fixture
+            .client
+            .put(Bytes::from_static(b"moved"), Bytes::new())
+            .unwrap()
+            .await,
+        MutationOutcome::Unknown(_)
+    ));
+    assert_eq!(fixture.state.mutations.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.state.directories.load(Ordering::SeqCst), 1);
+    fixture.state.missing_read.store(true, Ordering::SeqCst);
+    assert_eq!(
+        fixture
+            .client
+            .get(Bytes::from_static(b"moved"))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(fixture.state.directories.load(Ordering::SeqCst), 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn gateway_refresh_coalesces_new_revision_and_preserves_original_deadline_when_unavailable() {
+    let mut fixture = RefreshFixture::start().await;
+    fixture.publish(fixture.updated.clone());
+    fixture
+        .state
+        .first_metadata_delay_ms
+        .store(40, Ordering::SeqCst);
+    let gateway = fixture.gateway.gateway();
+    let request = rockbee_raft_protocol::KvRequest::Get {
+        key: Bytes::from_static(b"moved"),
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let results = tokio::join!(
+        gateway.handle(request.clone(), deadline),
+        gateway.handle(request.clone(), deadline),
+        gateway.handle(request.clone(), deadline),
+        gateway.handle(request.clone(), deadline)
+    );
+    for result in [results.0, results.1, results.2, results.3] {
+        assert_eq!(
+            result,
+            KvResponse::Value(Some(Bytes::from_static(b"from D")))
+        );
+    }
+    assert_eq!(fixture.state.directories.load(Ordering::SeqCst), 2);
+    fixture.state.d_unavailable.store(true, Ordering::SeqCst);
+    fixture
+        .state
+        .metadata_unavailable
+        .store(true, Ordering::SeqCst);
+    fixture
+        .state
+        .first_metadata_delay_ms
+        .store(600, Ordering::SeqCst);
+    let started = Instant::now();
+    assert!(matches!(
+        fixture
+            .gateway
+            .gateway()
+            .handle(request, started + Duration::from_millis(120))
+            .await,
+        KvResponse::ReadError(_)
+    ));
+    assert!(started.elapsed() < Duration::from_millis(250));
+    assert!(fixture.state.directories.load(Ordering::SeqCst) >= 5);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn short_metadata_refresh_does_not_retire_an_unrelated_pending_mutation() {
+    let mut fixture = RefreshFixture::start().await;
+    fixture.state.hold_mutation.store(true, Ordering::SeqCst);
+    fixture
+        .state
+        .first_metadata_delay_ms
+        .store(600, Ordering::SeqCst);
+    fixture
+        .state
+        .metadata_unavailable
+        .store(true, Ordering::SeqCst);
+    let gateway = fixture.gateway.gateway();
+    let now = Instant::now();
+    let (mutation, read) = tokio::join!(
+        gateway.handle(
+            rockbee_raft_protocol::KvRequest::Put {
+                key: Bytes::from_static(b"pending"),
+                value: Bytes::new(),
+            },
+            now + Duration::from_secs(2)
+        ),
+        async {
+            // Positively observe the handed PUT and hold its response until
+            // metadata refresh has timed out and tried another voter.
+            fixture.state.mutation_started.notified().await;
+            let read = gateway
+                .handle(
+                    rockbee_raft_protocol::KvRequest::Get {
+                        key: Bytes::from_static(b"moved"),
+                    },
+                    Instant::now() + Duration::from_millis(120),
+                )
+                .await;
+            fixture.state.release_mutation.notify_one();
+            read
+        }
+    );
+    assert_eq!(mutation, KvResponse::Mutation(MutationOutcome::Committed));
+    assert!(matches!(read, KvResponse::ReadError(_)));
+    assert_eq!(fixture.state.mutations.load(Ordering::SeqCst), 1);
+    assert!(fixture.state.directories.load(Ordering::SeqCst) >= 4);
+    fixture.state.missing_read.store(true, Ordering::SeqCst);
+    assert_eq!(
+        fixture
+            .client
+            .get(Bytes::from_static(b"after refresh"))
+            .await
+            .unwrap(),
+        None
+    );
+    fixture.close().await;
+}

@@ -51,11 +51,45 @@ impl PeerServer {
         groups: BTreeMap<GroupId, Raft<TypeConfig>>,
         resources: Arc<PeerResources>,
     ) -> Self {
+        Self::start_inner(
+            listener,
+            identity,
+            groups,
+            resources,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_with_dispatch_tracker(
+        listener: TcpListener,
+        identity: PeerIdentity,
+        groups: BTreeMap<GroupId, Raft<TypeConfig>>,
+        resources: Arc<PeerResources>,
+        tracker: super::test_support::DispatchTracker,
+    ) -> Self {
+        Self::start_inner(listener, identity, groups, resources, Some(tracker))
+    }
+
+    fn start_inner(
+        listener: TcpListener,
+        identity: PeerIdentity,
+        groups: BTreeMap<GroupId, Raft<TypeConfig>>,
+        resources: Arc<PeerResources>,
+        #[cfg(test)] tracker: Option<super::test_support::DispatchTracker>,
+    ) -> Self {
         info!("raft_peer_server_start node={}", identity.node_id.get());
         let (shutdown, receiver) = watch::channel(false);
         let groups = Arc::new(groups);
         let accept_task = tokio::spawn(run_accept_loop(
-            listener, identity, groups, resources, receiver,
+            listener,
+            identity,
+            groups,
+            resources,
+            receiver,
+            #[cfg(test)]
+            tracker,
         ));
         Self {
             node_id: identity.node_id,
@@ -89,6 +123,7 @@ async fn run_accept_loop(
     groups: Arc<BTreeMap<GroupId, Raft<TypeConfig>>>,
     resources: Arc<PeerResources>,
     mut shutdown: watch::Receiver<bool>,
+    #[cfg(test)] tracker: Option<super::test_support::DispatchTracker>,
 ) {
     let mut tasks = JoinSet::new();
     loop {
@@ -119,6 +154,8 @@ async fn run_accept_loop(
                     let child_groups = Arc::clone(&groups);
                     let child_resources = Arc::clone(&resources);
                     let child_shutdown = shutdown.clone();
+                    #[cfg(test)]
+                    let child_tracker = tracker.clone();
                     tasks.spawn(async move {
                         let _connection = connection;
                         let span = Span::start(
@@ -128,7 +165,7 @@ async fn run_accept_loop(
                             "peer_connection",
                             false,
                         );
-                        match serve_connection(stream, identity, child_groups, child_resources, child_shutdown).await {
+                        match serve_connection(stream, identity, child_groups, child_resources, child_shutdown, #[cfg(test)] child_tracker).await {
                             Ok(()) => span.success(),
                             Err(error) => {
                                 span.failure(&error);
@@ -162,6 +199,7 @@ async fn serve_connection(
     groups: Arc<BTreeMap<GroupId, Raft<TypeConfig>>>,
     resources: Arc<PeerResources>,
     mut shutdown: watch::Receiver<bool>,
+    #[cfg(test)] tracker: Option<super::test_support::DispatchTracker>,
 ) -> Result<(), PeerError> {
     const PHASE_TIMEOUT: Duration = Duration::from_secs(10);
     let mut pinned_source = None;
@@ -228,7 +266,16 @@ async fn serve_connection(
         };
         request.validate_shape(resources.limits().max_snapshot_chunk_bytes)?;
         let response_header = PeerHeader::response_for(&request.header, identity.node_id);
+        // Test-only final admission shares the cut seal mutex. Buffered bytes
+        // on an existing socket cannot begin native work after a cut ACK.
+        #[cfg(test)]
+        let dispatch_guard = tracker
+            .as_ref()
+            .map(|tracker| tracker.try_admit(&request.header))
+            .transpose()?;
         let response_body = dispatch(request, Arc::clone(&groups)).await;
+        #[cfg(test)]
+        drop(dispatch_guard);
         let response = PeerResponse {
             header: response_header,
             body: response_body,

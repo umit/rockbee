@@ -11,8 +11,14 @@ four data groups. Runtime tests also cover leader shutdown, surviving-quorum
 reads/deletes, disk reopen and replica catch-up. Node and gateway entry points
 now start their actual runtimes. A three-process test also preserves an
 acknowledged value after killing all node processes and reopening their existing
-databases. Durable snapshots, changing placement and broader fault verification
-remain in progress.
+databases. A blank fourth node now receives a streamed snapshot plus later logs
+and preserves them on offline reopen. A finite ABC-to-ABD replica move is also
+verified: after D becomes the actual leader, the same running gateway and client
+refresh routing and complete GET, PUT and DELETE.
+
+Movement currently permits **one immutable lifetime target per data group**;
+metadata voters and sibling groups stay unchanged. General repeated moves and
+the remaining partition/crash schedules are still in progress.
 
 ## Packages
 

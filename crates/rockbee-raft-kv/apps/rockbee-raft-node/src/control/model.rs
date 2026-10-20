@@ -1,0 +1,434 @@
+use std::collections::BTreeMap;
+
+use rockbee_raft_protocol::{
+    GroupId, NodeId,
+    control::{CommittedLogPosition, MoveIntent, MoveJobId, MoveProgress, MoveRecord},
+    routing::{ClusterDirectory, NodeEndpoint},
+};
+use serde::{Deserialize, Serialize};
+
+use super::{encoding, validation};
+
+/// Existing directory key; its framed value format remains unchanged.
+pub const DIRECTORY_KEY: &[u8] = b"rockbee/internal/initial-directory/v1";
+/// Immutable bootstrap identity stored as an ordinary generation state value.
+pub const ORIGIN_KEY: &[u8] = b"rockbee/internal/bootstrap-origin/v1";
+/// Prefix for one lifetime job per configured data group; followed by a u64 BE ID.
+pub const JOB_KEY_PREFIX: &[u8] = b"rockbee/internal/move-job/v1/";
+/// Maximum framed bytes for a current directory or immutable origin.
+pub const MAX_DIRECTORY_BYTES: usize = 64 * 1024;
+/// Maximum framed bytes for one immutable move and its progress.
+pub const MAX_JOB_BYTES: usize = 4 * 1024;
+/// Reservation for at most three effects, keys and native overhead included.
+/// Applied-state record and batch header are additional integration charges.
+pub const METADATA_EFFECT_RESERVATION: usize = 192 * 1024;
+
+/// Serializable group-zero metadata proposals for singleton durable apply.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MetadataCommand {
+    InitializeDirectoryIfAbsent {
+        initial_directory: ClusterDirectory,
+    },
+    BeginMove {
+        intent: MoveIntent,
+    },
+    CompleteMove {
+        expected_directory_revision: u64,
+        data_group: GroupId,
+        job_id: MoveJobId,
+        observation: MembershipObservation,
+    },
+}
+
+impl MetadataCommand {
+    /// Checks self-contained shape at durable-log and private-peer boundaries.
+    /// Cross-record conditions remain normal apply-time conflicts.
+    ///
+    /// # Errors
+    /// Returns an error for invalid intrinsic fields or oversized encoding.
+    pub fn validate(&self) -> Result<(), rockbee_raft_protocol::ProtocolError> {
+        use rockbee_raft_protocol::ProtocolError;
+        match self {
+            Self::InitializeDirectoryIfAbsent { initial_directory } => {
+                initial_directory.validate()?;
+                validation::validate_bootstrap_shape(initial_directory)
+                    .map_err(|_| ProtocolError::InvalidRouting("invalid bootstrap shape"))?;
+                encoding::check_size(initial_directory, MAX_DIRECTORY_BYTES)
+                    .map_err(|_| ProtocolError::InvalidRouting("oversized bootstrap directory"))?;
+            }
+            Self::BeginMove { intent } => intent.validate()?,
+            Self::CompleteMove {
+                expected_directory_revision,
+                data_group,
+                observation,
+                ..
+            } => {
+                if *expected_directory_revision == 0
+                    || data_group.is_metadata()
+                    || data_group.get() > 256
+                    || observation.voters.windows(2).any(|pair| pair[0] >= pair[1])
+                {
+                    return Err(ProtocolError::InvalidRouting("invalid completion shape"));
+                }
+                let endpoint = &observation.replacement_endpoint;
+                if endpoint.peer_address == endpoint.data_address
+                    || [endpoint.peer_address, endpoint.data_address]
+                        .iter()
+                        .any(|address| {
+                            address.port() == 0
+                                || address.ip().is_unspecified()
+                                || address.ip().is_multicast()
+                        })
+                {
+                    return Err(ProtocolError::InvalidRouting("invalid completion endpoint"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Internal observation of committed membership, never an external certificate.
+///
+/// Private fields prevent ordinary callers from constructing a witness. Serde
+/// exists for trusted internal Raft records only; no external RPC accepts it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MembershipObservation {
+    pub(crate) uniform: bool,
+    pub(crate) voters: [NodeId; 3],
+    pub(crate) replacement_endpoint: NodeEndpoint,
+    pub(crate) membership: CommittedLogPosition,
+}
+
+/// Small responses; consumers re-read directory or job state when needed.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MetadataResult {
+    Initialized {
+        revision: u64,
+    },
+    AlreadyInitialized {
+        revision: u64,
+    },
+    Accepted {
+        data_group: GroupId,
+        job_id: MoveJobId,
+    },
+    AlreadyAccepted {
+        data_group: GroupId,
+        job_id: MoveJobId,
+    },
+    Completed {
+        data_group: GroupId,
+        job_id: MoveJobId,
+        revision: u64,
+    },
+    AlreadyCompleted {
+        data_group: GroupId,
+        job_id: MoveJobId,
+        revision: u64,
+    },
+    Conflict {
+        reason: ConflictReason,
+    },
+}
+
+/// Conditional rejection is normal; it does not change durable state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ConflictReason {
+    BootstrapMismatch,
+    RevisionMismatch,
+    PlacementMismatch,
+    ExistingMove,
+    UnknownMove,
+    InvalidIntent,
+    EndpointUnion,
+    MembershipMismatch,
+    RevisionExhausted,
+}
+
+/// One replacement of a reserved generation-prefixed state value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataEffect {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
+/// All effects must be persisted atomically with the Raft applied identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataTransition {
+    pub result: MetadataResult,
+    pub effects: Vec<MetadataEffect>,
+}
+
+/// Persisted corruption is fatal to apply, unlike a conditional conflict.
+#[derive(Debug, thiserror::Error)]
+pub enum MetadataError {
+    #[error("corrupt metadata: {0}")]
+    Corrupt(&'static str),
+    #[error("metadata codec failure: {0}")]
+    Codec(#[from] rockbee_raft_protocol::ProtocolError),
+    #[error("metadata value exceeds its encoded bound")]
+    EncodedLimit,
+}
+
+/// One bounded metadata snapshot, loaded only for a metadata command.
+///
+/// Each configured data group has at most one lifetime job. In Java terms this
+/// is a checked aggregate, not a cache or controller: apply decides a complete
+/// transition before replacing any field.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MetadataView {
+    pub(super) current: Option<ClusterDirectory>,
+    pub(super) origin: Option<ClusterDirectory>,
+    pub(super) jobs: BTreeMap<GroupId, MoveRecord>,
+}
+
+impl MetadataView {
+    /// Builds a view from already decoded storage values.
+    ///
+    /// # Errors
+    /// Returns an error for corrupt or oversized cross-record state.
+    pub fn from_parts(
+        current: Option<ClusterDirectory>,
+        origin: Option<ClusterDirectory>,
+        jobs: BTreeMap<GroupId, MoveRecord>,
+    ) -> Result<Self, MetadataError> {
+        let view = Self {
+            current,
+            origin,
+            jobs,
+        };
+        validation::validate_view(&view)?;
+        Ok(view)
+    }
+
+    /// Decodes capped framed state values without accepting a collection hint.
+    ///
+    /// The storage adapter scans only the reserved job prefix, strips each
+    /// generation prefix, and supplies the group encoded in its logical key.
+    /// Duplicate groups or more jobs than configured groups fail before insert.
+    ///
+    /// # Errors
+    /// Returns an error for oversized, malformed, or inconsistent stored state.
+    pub fn from_encoded<'a>(
+        current: Option<&[u8]>,
+        origin: Option<&[u8]>,
+        jobs: impl IntoIterator<Item = (GroupId, &'a [u8])>,
+    ) -> Result<Self, MetadataError> {
+        let current: Option<ClusterDirectory> = current
+            .map(|bytes| encoding::decode_bounded(bytes, MAX_DIRECTORY_BYTES))
+            .transpose()?;
+        let origin = origin
+            .map(|bytes| encoding::decode_bounded(bytes, MAX_DIRECTORY_BYTES))
+            .transpose()?;
+        let limit = current
+            .as_ref()
+            .map_or(0, |directory| usize::from(directory.shard_config.count()));
+        let mut records = BTreeMap::new();
+        for (group, bytes) in jobs {
+            if records.len() >= limit || records.contains_key(&group) {
+                return Err(MetadataError::Corrupt("duplicate or excess move records"));
+            }
+            records.insert(group, encoding::decode_bounded(bytes, MAX_JOB_BYTES)?);
+        }
+        Self::from_parts(current, origin, records)
+    }
+
+    pub fn directory(&self) -> Option<&ClusterDirectory> {
+        self.current.as_ref()
+    }
+    pub(crate) fn into_directory(self) -> Option<ClusterDirectory> {
+        self.current
+    }
+    pub fn origin(&self) -> Option<&ClusterDirectory> {
+        self.origin.as_ref()
+    }
+    pub fn job(&self, group: GroupId) -> Option<&MoveRecord> {
+        self.jobs.get(&group)
+    }
+
+    /// Computes effects before updating this in-memory view.
+    ///
+    /// # Errors
+    /// Returns an error for corrupt persisted state or an encoding limit.
+    pub fn apply(&mut self, command: MetadataCommand) -> Result<MetadataTransition, MetadataError> {
+        validation::validate_view(self)?;
+        match command {
+            MetadataCommand::InitializeDirectoryIfAbsent { initial_directory } => {
+                self.initialize(initial_directory)
+            }
+            MetadataCommand::BeginMove { intent } => self.begin(intent),
+            MetadataCommand::CompleteMove {
+                expected_directory_revision,
+                data_group,
+                job_id,
+                observation,
+            } => self.complete(expected_directory_revision, data_group, job_id, observation),
+        }
+    }
+
+    fn initialize(
+        &mut self,
+        initial: ClusterDirectory,
+    ) -> Result<MetadataTransition, MetadataError> {
+        if initial.validate().is_err() || validation::validate_bootstrap_shape(&initial).is_err() {
+            return Ok(conflict(ConflictReason::BootstrapMismatch));
+        }
+        encoding::check_size(&initial, MAX_DIRECTORY_BYTES)?;
+        if let Some(origin) = &self.origin {
+            if *origin != initial {
+                return Ok(conflict(ConflictReason::BootstrapMismatch));
+            }
+            let revision = self
+                .current
+                .as_ref()
+                .ok_or(MetadataError::Corrupt("origin without directory"))?
+                .revision;
+            return Ok(no_effects(MetadataResult::AlreadyInitialized { revision }));
+        }
+        if let Some(current) = &self.current {
+            if *current != initial {
+                return Ok(conflict(ConflictReason::BootstrapMismatch));
+            }
+            let effects = encoding::origin_effect(&initial)?;
+            self.origin = Some(initial);
+            return Ok(MetadataTransition {
+                result: MetadataResult::AlreadyInitialized { revision: 1 },
+                effects,
+            });
+        }
+        let effects = encoding::initialize_effects(&initial)?;
+        self.current = Some(initial.clone());
+        self.origin = Some(initial);
+        Ok(MetadataTransition {
+            result: MetadataResult::Initialized { revision: 1 },
+            effects,
+        })
+    }
+
+    fn begin(&mut self, intent: MoveIntent) -> Result<MetadataTransition, MetadataError> {
+        // Check durable identity before revision: a lost response may be retried
+        // after this or a sibling group has already finished its move.
+        if let Some(existing) = self.jobs.get(&intent.data_group) {
+            return Ok(if existing.intent == intent {
+                no_effects(MetadataResult::AlreadyAccepted {
+                    data_group: intent.data_group,
+                    job_id: intent.job_id,
+                })
+            } else {
+                conflict(ConflictReason::ExistingMove)
+            });
+        }
+        if intent.validate().is_err() {
+            return Ok(conflict(ConflictReason::InvalidIntent));
+        }
+        let (Some(current), Some(_origin)) = (&self.current, &self.origin) else {
+            return Ok(conflict(ConflictReason::BootstrapMismatch));
+        };
+        if current.revision != intent.expected_directory_revision {
+            return Ok(conflict(ConflictReason::RevisionMismatch));
+        }
+        if !validation::same_voters(current.voters(intent.data_group), &intent.old_voters) {
+            return Ok(conflict(ConflictReason::PlacementMismatch));
+        }
+        if validation::validate_union(current, &self.jobs, Some(&intent.add_node)).is_err() {
+            return Ok(conflict(ConflictReason::EndpointUnion));
+        }
+        let group = intent.data_group;
+        let job_id = intent.job_id;
+        let record = MoveRecord {
+            intent,
+            progress: MoveProgress::Pending,
+        };
+        let effects = encoding::job_effect(group, &record)?;
+        self.jobs.insert(group, record);
+        Ok(MetadataTransition {
+            result: MetadataResult::Accepted {
+                data_group: group,
+                job_id,
+            },
+            effects,
+        })
+    }
+
+    fn complete(
+        &mut self,
+        expected_revision: u64,
+        group: GroupId,
+        job_id: MoveJobId,
+        observation: MembershipObservation,
+    ) -> Result<MetadataTransition, MetadataError> {
+        let Some(record) = self.jobs.get(&group) else {
+            return Ok(conflict(ConflictReason::UnknownMove));
+        };
+        if record.intent.job_id != job_id {
+            return Ok(conflict(ConflictReason::ExistingMove));
+        }
+        let current = self
+            .current
+            .as_ref()
+            .ok_or(MetadataError::Corrupt("job without directory"))?;
+        // Completion retries keep the first durable proof, even if a stale
+        // reconciler supplies another revision or observation on its retry.
+        if matches!(record.progress, MoveProgress::Completed { .. }) {
+            return Ok(no_effects(MetadataResult::AlreadyCompleted {
+                data_group: group,
+                job_id,
+                revision: current.revision,
+            }));
+        }
+        if current.revision != expected_revision {
+            return Ok(conflict(ConflictReason::RevisionMismatch));
+        }
+        if !observation.uniform
+            || observation.voters != record.intent.target_voters
+            || observation.replacement_endpoint != record.intent.add_node
+        {
+            return Ok(conflict(ConflictReason::MembershipMismatch));
+        }
+        let Some(revision) = current.revision.checked_add(1) else {
+            return Ok(conflict(ConflictReason::RevisionExhausted));
+        };
+        let mut directory = current.clone();
+        directory.revision = revision;
+        if directory.node(record.intent.add_node.node_id).is_none() {
+            directory.nodes.push(record.intent.add_node.clone());
+            directory.nodes.sort_by_key(|node| node.node_id);
+        }
+        let placement = directory
+            .placements
+            .iter_mut()
+            .find(|placement| placement.group_id == group)
+            .ok_or(MetadataError::Corrupt("move group has no placement"))?;
+        placement.voters = record.intent.target_voters.to_vec();
+        let completed = MoveRecord {
+            intent: record.intent.clone(),
+            progress: MoveProgress::Completed {
+                membership: observation.membership,
+            },
+        };
+        let effects = encoding::completion_effects(&directory, group, &completed)?;
+        // No mutation occurs until every output has passed its size check.
+        self.current = Some(directory);
+        self.jobs.insert(group, completed);
+        Ok(MetadataTransition {
+            result: MetadataResult::Completed {
+                data_group: group,
+                job_id,
+                revision,
+            },
+            effects,
+        })
+    }
+}
+
+fn no_effects(result: MetadataResult) -> MetadataTransition {
+    MetadataTransition {
+        result,
+        effects: Vec::new(),
+    }
+}
+
+fn conflict(reason: ConflictReason) -> MetadataTransition {
+    no_effects(MetadataResult::Conflict { reason })
+}

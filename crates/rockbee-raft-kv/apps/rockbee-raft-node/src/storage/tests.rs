@@ -8,7 +8,7 @@ use openraft::{
     storage::{RaftLogStorage, RaftLogStorageExt, RaftStateMachine},
 };
 
-fn identity() -> StorageIdentity {
+pub(super) fn identity() -> StorageIdentity {
     StorageIdentity {
         cluster_id: ClusterId::new([2; 16]).unwrap(),
         node_id: NodeId::new(1).unwrap(),

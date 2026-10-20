@@ -29,10 +29,26 @@ async fn run() -> Result<(), String> {
     };
     // Install both signal handlers before creating listeners or Raft tasks.
     let mut shutdown = ShutdownSignals::install().map_err(|error| error.to_string())?;
-    let node_id = arguments.config.node_id;
-    let mut node = NodeRuntime::start(arguments.config)
-        .await
-        .map_err(|error| error.to_string())?;
+    let (node_id, mut node) = match arguments.config {
+        cli::Startup::Bootstrap(config) => {
+            let id = config.node_id;
+            (
+                id,
+                NodeRuntime::start(config)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            )
+        }
+        cli::Startup::Join(config) => {
+            let id = config.local_endpoint.node_id;
+            (
+                id,
+                NodeRuntime::start_join(config)
+                    .await
+                    .map_err(|error| error.to_string())?,
+            )
+        }
+    };
     let result = serve(&node, arguments.initialize, &mut shutdown).await;
     // Even bootstrap/signal errors take the same owned shutdown path.
     node.close().await;

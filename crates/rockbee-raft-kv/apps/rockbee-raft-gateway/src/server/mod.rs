@@ -1,6 +1,14 @@
 //! Gateway request handler and public listener lifecycle.
 
-use std::{collections::BTreeMap, future::Future, sync::Arc};
+use std::{
+    cmp::Ordering as RevisionOrder,
+    collections::BTreeMap,
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use rockbee_raft_protocol::{
     ClusterId, Failure, FailureReason, GroupId, KvRequest, KvResponse, MutationOutcome, NodeId,
@@ -13,7 +21,7 @@ use rockbee_raft_protocol::{
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
-    sync::Mutex,
+    sync::{Mutex, RwLock},
     time::{Instant, timeout_at},
 };
 
@@ -41,7 +49,10 @@ struct BackendConnection {
 /// Validated gateway routing state plus bounded links to backend nodes.
 pub struct Gateway {
     cluster_id: ClusterId,
-    directory: ClusterDirectory,
+    directory: RwLock<Arc<ClusterDirectory>>,
+    /// Completion generation, including failed and unchanged refresh attempts.
+    refresh_generation: AtomicU64,
+    refresh: Mutex<Result<(), RefreshFailure>>,
     backend_config: rockbee_raft_protocol::transport::LinkConfig,
     /// One creation lock per node. The directory map lock is never held while
     /// dialing a backend, so one unavailable node cannot stall healthy nodes.
@@ -59,77 +70,90 @@ impl Gateway {
         if deadline <= Instant::now() {
             return Err(GatewayError::StartupDeadline);
         }
-        let mut links = BTreeMap::new();
-        for seed in &config.seeds {
+        for (index, seed) in config.seeds.iter().enumerate() {
+            let candidate_deadline = shared_deadline(deadline, config.seeds.len() - index);
             log::debug!(
                 "directory discovery node={} address={}",
                 seed.node_id.get(),
                 seed.address
             );
-            let Ok(link) = BackendLink::connect(seed.address, config.backend_link, deadline).await
+            let Ok(mut link) =
+                BackendLink::connect(seed.address, config.backend_link, candidate_deadline).await
             else {
                 continue;
             };
-            let directory = read_directory(&link, config.cluster_id, seed.node_id, deadline).await;
-            let directory = match directory {
-                Some(directory) => Some(directory),
-                None => {
-                    let leader =
-                        read_metadata_leader(&link, config.cluster_id, seed.node_id, deadline)
-                            .await;
-                    let Some(leader) = leader else {
-                        continue;
-                    };
-                    let Some(leader_seed) = config
+            let mut source = *seed;
+            let mut directory =
+                read_directory(&link, config.cluster_id, source.node_id, candidate_deadline).await;
+            if directory.is_none() {
+                let leader = read_metadata_leader(
+                    &link,
+                    config.cluster_id,
+                    source.node_id,
+                    candidate_deadline,
+                )
+                .await;
+                // Every discarded startup generation is explicitly retired and joined.
+                link.close().await;
+                let Some(leader_seed) = leader.and_then(|leader| {
+                    config
                         .seeds
                         .iter()
                         .find(|candidate| candidate.node_id == leader)
-                    else {
-                        continue;
-                    };
-                    let Ok(leader_link) =
-                        BackendLink::connect(leader_seed.address, config.backend_link, deadline)
-                            .await
-                    else {
-                        continue;
-                    };
-                    let result =
-                        read_directory(&leader_link, config.cluster_id, leader, deadline).await;
-                    if result.is_some() {
-                        links.insert(
-                            leader,
-                            Arc::new(Mutex::new(BackendSlotState {
-                                generation: 1,
-                                link: Some(leader_link),
-                            })),
-                        );
-                    }
-                    result
-                }
-            };
+                }) else {
+                    continue;
+                };
+                let Ok(leader_link) = BackendLink::connect(
+                    leader_seed.address,
+                    config.backend_link,
+                    candidate_deadline,
+                )
+                .await
+                else {
+                    continue;
+                };
+                link = leader_link;
+                source = *leader_seed;
+                directory =
+                    read_directory(&link, config.cluster_id, source.node_id, candidate_deadline)
+                        .await;
+            }
             let Some(directory) = directory else {
+                link.close().await;
                 continue;
             };
             if directory.cluster_id != config.cluster_id
                 || directory.shard_config != config.expected_shard_config
                 || directory.validate().is_err()
             {
+                link.close().await;
                 continue;
             }
-            links
-                .entry(seed.node_id)
-                .or_insert_with(|| Arc::new(Mutex::new(BackendSlotState::default())))
-                .lock()
-                .await
-                .link
-                .replace(link);
+            let mut links = BTreeMap::new();
+            // Seeds are discovery addresses, never permission for an extra slot.
+            if directory
+                .node(source.node_id)
+                .is_some_and(|node| node.data_address == source.address)
+            {
+                links.insert(
+                    source.node_id,
+                    Arc::new(Mutex::new(BackendSlotState {
+                        generation: 1,
+                        link: Some(link),
+                    })),
+                );
+            } else {
+                link.close().await;
+            }
             log::info!(
                 "gateway directory validated seed_node={}",
-                seed.node_id.get()
+                source.node_id.get()
             );
             return Ok(Self {
                 cluster_id: config.cluster_id,
-                directory,
+                directory: RwLock::new(Arc::new(directory)),
+                refresh_generation: AtomicU64::new(0),
+                refresh: Mutex::new(Ok(())),
                 backend_config: config.backend_link,
                 links: Mutex::new(links),
                 metrics: GatewayMetrics::default(),
@@ -157,11 +181,11 @@ impl Gateway {
 
     async fn backend_link(
         &self,
+        directory: &ClusterDirectory,
         node_id: NodeId,
         deadline: Instant,
     ) -> Result<BackendConnection, GatewayError> {
-        let endpoint = self
-            .directory
+        let endpoint = directory
             .node(node_id)
             .ok_or(GatewayError::DirectoryUnavailable)?;
         let slot = self.backend_slot(node_id).await;
@@ -194,12 +218,12 @@ impl Gateway {
 
     async fn replace_backend_link(
         &self,
+        directory: &ClusterDirectory,
         node_id: NodeId,
         observed_generation: u64,
         deadline: Instant,
     ) -> Result<BackendConnection, GatewayError> {
-        let endpoint = self
-            .directory
+        let endpoint = directory
             .node(node_id)
             .ok_or(GatewayError::DirectoryUnavailable)?;
         let slot = self.backend_slot(node_id).await;
@@ -242,112 +266,217 @@ impl Gateway {
             .clone()
     }
 
+    async fn directory_snapshot(&self) -> Arc<ClusterDirectory> {
+        Arc::clone(&*self.directory.read().await)
+    }
+
+    async fn publish_directory(
+        &self,
+        next: ClusterDirectory,
+    ) -> Result<Option<Arc<ClusterDirectory>>, RefreshFailure> {
+        let mut current = self.directory.write().await;
+        match validate_directory_update(&current, &next)? {
+            RevisionOrder::Less => Ok(None),
+            RevisionOrder::Equal => Ok(Some(Arc::clone(&current))),
+            RevisionOrder::Greater => {
+                log::info!(
+                    "gateway directory refreshed old_revision={} revision={}",
+                    current.revision,
+                    next.revision
+                );
+                *current = Arc::new(next);
+                Ok(Some(Arc::clone(&current)))
+            }
+        }
+    }
+
+    async fn refresh_directory(
+        &self,
+        observed_generation: u64,
+        deadline: Instant,
+    ) -> Result<Arc<ClusterDirectory>, RefreshFailure> {
+        let mut completed = timeout_at(deadline, self.refresh.lock())
+            .await
+            .map_err(|_| RefreshFailure::Deadline)?;
+        if self.refresh_generation.load(Ordering::Acquire) != observed_generation {
+            // Joiners reuse the completed result even when no revision changed.
+            (*completed)?;
+            return Ok(self.directory_snapshot().await);
+        }
+        let result = self.fetch_directory(deadline).await;
+        *completed = result.as_ref().map(|_| ()).map_err(|error| *error);
+        self.refresh_generation.fetch_add(1, Ordering::Release);
+        result
+    }
+
+    async fn fetch_directory(
+        &self,
+        deadline: Instant,
+    ) -> Result<Arc<ClusterDirectory>, RefreshFailure> {
+        let snapshot = self.directory_snapshot().await;
+        let candidates = snapshot
+            .voters(GroupId::new(0))
+            .ok_or(RefreshFailure::InvalidDirectory)?;
+        for (index, node_id) in candidates.iter().copied().enumerate() {
+            if Instant::now() >= deadline {
+                return Err(RefreshFailure::Deadline);
+            }
+            // Reserve a finite share for every remaining metadata voter and
+            // for the request's routing pass after successful publication.
+            let candidate_deadline = shared_deadline(deadline, candidates.len() - index + 1);
+            let endpoint = snapshot
+                .node(node_id)
+                .ok_or(RefreshFailure::InvalidDirectory)?;
+            // A handed timeout retires the entire Link generation. Metadata
+            // subdeadlines therefore use a refresh-owned link, never the pool
+            // that can carry unrelated durable mutations or reads.
+            let Ok(link) = BackendLink::connect(
+                endpoint.data_address,
+                self.backend_config,
+                candidate_deadline,
+            )
+            .await
+            else {
+                continue;
+            };
+            let request = BackendRequest {
+                cluster_id: self.cluster_id,
+                target_node: node_id,
+                operation: BackendOperation::Directory,
+            };
+            let response = match link.try_submit(request, candidate_deadline) {
+                Ok(pending) => pending.await,
+                Err(error) => Err(admission_failure(error)),
+            };
+            // Singleflight owns at most one temporary metadata generation and
+            // retires/joins it before trying another candidate or publishing.
+            link.close().await;
+            match response {
+                Ok(BackendResponse {
+                    reply: BackendReply::Directory(Ok(next)),
+                    ..
+                }) => {
+                    if let Some(published) = self.publish_directory(next).await? {
+                        return Ok(published);
+                    }
+                }
+                Err(TransportFailure {
+                    reason: rockbee_raft_protocol::transport::TransportFailureKind::Protocol,
+                    ..
+                }) => {
+                    return Err(RefreshFailure::InvalidDirectory);
+                }
+                _ => {}
+            }
+        }
+        Err(RefreshFailure::Unavailable)
+    }
+
     async fn route(&self, request: KvRequest, deadline: Instant) -> KvResponse {
-        let Ok(group_id) = group_for_request(&self.directory, &request) else {
+        let refresh_generation = self.refresh_generation.load(Ordering::Acquire);
+        let mut snapshot = self.directory_snapshot().await;
+        let Ok(group_id) = group_for_request(&snapshot, &request) else {
             self.metrics.rejected();
             return rejected(FailureReason::InvalidRequest, "key cannot be routed");
         };
-        let Some(candidates) = self.directory.voters(group_id) else {
-            self.metrics.rejected();
-            return rejected(FailureReason::Unavailable, "directory has no group voters");
-        };
-        let candidates = candidates.to_vec();
         let is_mutation = !matches!(request, KvRequest::Get { .. });
         let operation = operation_name(&request);
         let mut last_read_failure = None;
         let mut last_unsent_mutation = None;
-        for node_id in candidates {
-            if deadline <= Instant::now() {
+        // A request refreshes at most once and keeps its original deadline.
+        for pass in 0..2 {
+            let Some(candidates) = snapshot.voters(group_id) else {
+                return routing_failure(
+                    is_mutation,
+                    FailureReason::Unavailable,
+                    "directory has no group voters",
+                );
+            };
+            for (index, node_id) in candidates.iter().copied().enumerate() {
+                if deadline <= Instant::now() {
+                    break;
+                }
+                let candidate_deadline =
+                    shared_deadline(deadline, candidates.len() - index + usize::from(pass == 0));
+                // Both handed reads and mutations retain the original budget:
+                // a shortened shared-link deadline would retire unrelated work.
+                // Only pre-handoff connection waits are shared among voters.
+                log::trace!(
+                    "route attempt operation={operation} group={} node={} revision={}",
+                    group_id.get(),
+                    node_id.get(),
+                    snapshot.revision
+                );
+                let response = self
+                    .route_to_node(
+                        &snapshot,
+                        node_id,
+                        group_id,
+                        request.clone(),
+                        candidate_deadline,
+                        deadline,
+                    )
+                    .await;
+                match response {
+                    Ok(KvResponse::Mutation(MutationOutcome::Rejected(failure)))
+                        if failure.reason == FailureReason::NotLeader => {}
+                    Ok(KvResponse::ReadError(ReadFailure(failure)))
+                        if matches!(
+                            failure.reason,
+                            FailureReason::NotLeader
+                                | FailureReason::Unavailable
+                                | FailureReason::Disconnected
+                                | FailureReason::Deadline
+                        ) =>
+                    {
+                        last_read_failure = Some(ReadFailure(failure));
+                    }
+                    Ok(response) => {
+                        // Includes Unknown and successful/missing reads. These
+                        // are final; metadata discovery cannot authorize replay.
+                        if let KvResponse::Mutation(MutationOutcome::Unknown(failure)) = &response {
+                            log::debug!(
+                                "mutation outcome unknown operation={operation} group={} node={} reason={:?} replay=false",
+                                group_id.get(),
+                                node_id.get(),
+                                failure.reason
+                            );
+                        }
+                        return response;
+                    }
+                    Err(error) if is_mutation => {
+                        self.metrics.backend_failure();
+                        match error.delivery {
+                            Delivery::NotSent => {
+                                last_unsent_mutation =
+                                    Some(KvResponse::Mutation(mutation_transport_failure(error)));
+                            }
+                            Delivery::MayHaveBeenSent => {
+                                log::debug!(
+                                    "mutation transport outcome unknown operation={operation} group={} node={} replay=false",
+                                    group_id.get(),
+                                    node_id.get()
+                                );
+                                return KvResponse::Mutation(mutation_transport_failure(error));
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        self.metrics.backend_failure();
+                        last_read_failure = Some(ReadFailure::new(Failure {
+                            reason: FailureReason::Unavailable,
+                            message: "backend read did not return a final result".to_owned(),
+                        }));
+                    }
+                }
+            }
+            if pass == 1 || Instant::now() >= deadline {
                 break;
             }
-            log::trace!(
-                "route attempt operation={operation} group={} node={} remaining_us={}",
-                group_id.get(),
-                node_id.get(),
-                deadline
-                    .saturating_duration_since(Instant::now())
-                    .as_micros()
-            );
-            let response = self
-                .route_to_node(node_id, group_id, request.clone(), deadline)
-                .await;
-            match response {
-                Ok(KvResponse::Mutation(MutationOutcome::Rejected(failure)))
-                    if failure.reason == FailureReason::NotLeader =>
-                {
-                    log::trace!(
-                        "route redirect operation={operation} group={} node={}",
-                        group_id.get(),
-                        node_id.get()
-                    );
-                    continue;
-                }
-                Ok(KvResponse::ReadError(ReadFailure(failure)))
-                    if failure.reason == FailureReason::NotLeader =>
-                {
-                    log::trace!(
-                        "route redirect operation={operation} group={} node={}",
-                        group_id.get(),
-                        node_id.get()
-                    );
-                    continue;
-                }
-                Ok(response) => {
-                    match &response {
-                        KvResponse::ReadError(error) => log::debug!(
-                            "backend read failed group={} node={} reason={:?}",
-                            group_id.get(),
-                            node_id.get(),
-                            error.0.reason
-                        ),
-                        KvResponse::Mutation(MutationOutcome::Unknown(failure)) => log::debug!(
-                            "mutation outcome unknown operation={operation} group={} node={} reason={:?} replay=false",
-                            group_id.get(),
-                            node_id.get(),
-                            failure.reason
-                        ),
-                        _ => {}
-                    }
-                    return response;
-                }
-                Err(error) if is_mutation => {
-                    log::debug!(
-                        "backend mutation transport failed operation={operation} group={} node={} delivery={:?} reason={:?}",
-                        group_id.get(),
-                        node_id.get(),
-                        error.delivery,
-                        error.reason
-                    );
-                    self.metrics.backend_failure();
-                    match error.delivery {
-                        // This request was never handed to this candidate. It
-                        // is safe to try another configured voter; this does
-                        // not replay a prior attempt.
-                        Delivery::NotSent => {
-                            last_unsent_mutation =
-                                Some(KvResponse::Mutation(mutation_transport_failure(error)));
-                        }
-                        // Handoff may have reached Raft. Preserve uncertainty
-                        // and stop before any other node can see a replay.
-                        Delivery::MayHaveBeenSent => {
-                            return KvResponse::Mutation(mutation_transport_failure(error));
-                        }
-                    }
-                }
-                Err(error) => {
-                    log::debug!(
-                        "backend read transport failed group={} node={} delivery={:?} reason={:?}",
-                        group_id.get(),
-                        node_id.get(),
-                        error.delivery,
-                        error.reason
-                    );
-                    self.metrics.backend_failure();
-                    last_read_failure = Some(ReadFailure::new(Failure {
-                        reason: FailureReason::Unavailable,
-                        message: "backend read did not return a final result".to_owned(),
-                    }));
-                }
+            match self.refresh_directory(refresh_generation, deadline).await {
+                Ok(refreshed) if refreshed.revision > snapshot.revision => snapshot = refreshed,
+                Ok(_) => break,
+                Err(error) => return routing_failure(is_mutation, error.reason(), error.message()),
             }
         }
         if is_mutation {
@@ -369,48 +498,25 @@ impl Gateway {
 
     async fn route_to_node(
         &self,
+        directory: &ClusterDirectory,
         node_id: NodeId,
         group_id: GroupId,
         request: KvRequest,
+        connect_deadline: Instant,
         deadline: Instant,
     ) -> Result<KvResponse, TransportFailure> {
-        let connection = self
-            .backend_link(node_id, deadline)
-            .await
-            .map_err(|error| {
-                log::debug!(
-                    "backend connection unavailable group={} node={} error={error}",
-                    group_id.get(),
-                    node_id.get()
-                );
-                TransportFailure {
-                    delivery: Delivery::NotSent,
-                    reason: rockbee_raft_protocol::transport::TransportFailureKind::Disconnected,
-                }
-            })?;
-        let backend_request = BackendRequest {
-            cluster_id: self.cluster_id,
-            target_node: node_id,
-            operation: BackendOperation::Kv { group_id, request },
-        };
-        let pending = match connection
-            .link
-            .try_submit(backend_request.clone(), deadline)
-        {
-            Ok(pending) => pending,
-            // Admission reports Closed before this request is queued or handed
-            // off. Replacing the retired generation is safe for this *new*
-            // request; a prior handed mutation is never submitted again.
-            Err(AdmitError::Closed) => self
-                .replace_backend_link(node_id, connection.generation, deadline)
-                .await
-                .map_err(connect_failure)?
-                .link
-                .try_submit(backend_request, deadline)
-                .map_err(admission_failure)?,
-            Err(error) => return Err(admission_failure(error)),
-        };
-        let response = pending.await?;
+        let response = self
+            .send_backend(
+                directory,
+                BackendRequest {
+                    cluster_id: self.cluster_id,
+                    target_node: node_id,
+                    operation: BackendOperation::Kv { group_id, request },
+                },
+                connect_deadline,
+                deadline,
+            )
+            .await?;
         match response.reply {
             BackendReply::Kv { response, .. } => Ok(response),
             _ => Err(TransportFailure {
@@ -418,6 +524,34 @@ impl Gateway {
                 reason: rockbee_raft_protocol::transport::TransportFailureKind::Protocol,
             }),
         }
+    }
+
+    async fn send_backend(
+        &self,
+        directory: &ClusterDirectory,
+        request: BackendRequest,
+        connect_deadline: Instant,
+        deadline: Instant,
+    ) -> Result<BackendResponse, TransportFailure> {
+        let node_id = request.target_node;
+        let connection = self
+            .backend_link(directory, node_id, connect_deadline)
+            .await
+            .map_err(connect_failure)?;
+        let pending = match connection.link.try_submit(request.clone(), deadline) {
+            Ok(pending) => pending,
+            // Closed admission proves this request was never handed off. Keep
+            // the generation-safe replacement used by ordinary later requests.
+            Err(AdmitError::Closed) => self
+                .replace_backend_link(directory, node_id, connection.generation, connect_deadline)
+                .await
+                .map_err(connect_failure)?
+                .link
+                .try_submit(request, deadline)
+                .map_err(admission_failure)?,
+            Err(error) => return Err(admission_failure(error)),
+        };
+        pending.await
     }
 }
 
@@ -509,8 +643,13 @@ impl GatewayRuntime {
     ) -> Result<Self, GatewayError> {
         let deadline = Instant::now() + config.startup_timeout;
         let gateway = Arc::new(Gateway::connect(&config, deadline).await?);
-        let server = Server::start(listener, config.server, Arc::clone(&gateway))
-            .map_err(GatewayError::Server)?;
+        let server = match Server::start(listener, config.server, Arc::clone(&gateway)) {
+            Ok(server) => server,
+            Err(error) => {
+                gateway.close().await;
+                return Err(GatewayError::Server(error));
+            }
+        };
         log::info!("gateway listening address={}", config.listen_address);
         Ok(Self { gateway, server })
     }
@@ -598,3 +737,97 @@ fn admission_failure(error: AdmitError) -> TransportFailure {
         reason,
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RefreshFailure {
+    Deadline,
+    Unavailable,
+    InvalidDirectory,
+    EqualRevisionConflict,
+}
+
+impl RefreshFailure {
+    fn reason(self) -> FailureReason {
+        match self {
+            Self::Deadline => FailureReason::Deadline,
+            Self::Unavailable => FailureReason::Unavailable,
+            Self::InvalidDirectory | Self::EqualRevisionConflict => FailureReason::Protocol,
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::Deadline => "directory refresh deadline expired",
+            Self::Unavailable => "metadata voters returned no current directory",
+            Self::InvalidDirectory => "directory refresh returned incompatible routing state",
+            Self::EqualRevisionConflict => "directory revision has conflicting routing state",
+        }
+    }
+}
+
+fn validate_directory_update(
+    current: &ClusterDirectory,
+    next: &ClusterDirectory,
+) -> Result<RevisionOrder, RefreshFailure> {
+    if next.validate().is_err()
+        || next.cluster_id != current.cluster_id
+        || next.shard_config != current.shard_config
+    {
+        return Err(RefreshFailure::InvalidDirectory);
+    }
+    let order = next.revision.cmp(&current.revision);
+    match order {
+        RevisionOrder::Less => return Ok(order),
+        RevisionOrder::Equal => {
+            return if next == current {
+                Ok(order)
+            } else {
+                Err(RefreshFailure::EqualRevisionConflict)
+            };
+        }
+        RevisionOrder::Greater => {}
+    }
+    // Retain every known node, including C for metadata and sibling groups.
+    if current
+        .nodes
+        .iter()
+        .any(|node| next.node(node.node_id) != Some(node))
+    {
+        return Err(RefreshFailure::InvalidDirectory);
+    }
+    let metadata = GroupId::new(0);
+    let old_voters = current
+        .voters(metadata)
+        .ok_or(RefreshFailure::InvalidDirectory)?;
+    let new_voters = next
+        .voters(metadata)
+        .ok_or(RefreshFailure::InvalidDirectory)?;
+    if old_voters.len() != new_voters.len()
+        || old_voters.iter().any(|node| !new_voters.contains(node))
+    {
+        return Err(RefreshFailure::InvalidDirectory);
+    }
+    Ok(order)
+}
+
+fn shared_deadline(deadline: Instant, remaining_shares: usize) -> Instant {
+    let now = Instant::now();
+    // Directory validation bounds candidates by sixteen; this is also used for
+    // at most sixteen startup seeds, with one optional refresh/routing share.
+    let shares = u32::try_from(remaining_shares).unwrap_or(u32::MAX).max(1);
+    now + deadline.saturating_duration_since(now) / shares
+}
+
+fn routing_failure(is_mutation: bool, reason: FailureReason, message: &str) -> KvResponse {
+    if is_mutation {
+        rejected(reason, message)
+    } else {
+        KvResponse::ReadError(ReadFailure::new(Failure {
+            reason,
+            message: message.to_owned(),
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use rockbee_raft_protocol::{
     ClusterId, GroupId, KvRequest, KvResponse, MutationOutcome, NodeId, ShardConfig, WireRequest,
-    backend::{BackendOperation, BackendReply, BackendRequest, BackendResponse},
+    backend::{BackendOperation, BackendReply, BackendRequest, BackendResponse, BootstrapOutcome},
     decode_frame, encode_frame,
     routing::{ClusterDirectory, NodeEndpoint},
 };
@@ -160,7 +160,7 @@ fn oversized_directory_collections_are_rejected_while_decoding() {
 }
 
 #[test]
-fn bootstrap_has_no_caller_payload_and_requires_a_remote_mutation_result() {
+fn bootstrap_has_no_caller_payload_and_requires_conditional_outcome() {
     let request = request(BackendOperation::BootstrapDirectory);
     request.validate().unwrap();
     let expected = request.expected_response();
@@ -168,20 +168,25 @@ fn bootstrap_has_no_caller_payload_and_requires_a_remote_mutation_result() {
     assert_eq!(decoded, request);
     BackendRequest::validate_response(
         expected,
-        &response(BackendReply::Bootstrap(MutationOutcome::Committed)),
+        &response(BackendReply::Bootstrap(BootstrapOutcome::Ready {
+            revision: std::num::NonZeroU64::new(1).unwrap(),
+        })),
     )
     .unwrap();
     let error = rockbee_raft_protocol::Failure {
         reason: rockbee_raft_protocol::FailureReason::Unavailable,
         message: "not sent is local-only".into(),
     };
-    assert!(
-        BackendRequest::validate_response(
-            expected,
-            &response(BackendReply::Bootstrap(MutationOutcome::NotSent(error))),
-        )
-        .is_err()
-    );
+    for outcome in [
+        BootstrapOutcome::Conflict(error.clone()),
+        BootstrapOutcome::NotSubmitted(error.clone()),
+        BootstrapOutcome::Unknown(error),
+    ] {
+        let reply = response(BackendReply::Bootstrap(outcome));
+        let decoded = decode_frame(&encode_frame(&reply).unwrap()).unwrap();
+        BackendRequest::validate_response(expected, &decoded).unwrap();
+        assert_eq!(reply, decoded);
+    }
     assert!(
         BackendRequest::validate_response(
             expected,
@@ -194,4 +199,46 @@ fn bootstrap_has_no_caller_payload_and_requires_a_remote_mutation_result() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn bootstrap_rejects_zero_revision_unbounded_diagnostics_and_wrong_identity() {
+    #[derive(serde::Serialize)]
+    enum InvalidOutcome {
+        Ready { revision: u64 },
+    }
+    assert!(
+        decode_frame::<BootstrapOutcome>(
+            &encode_frame(&InvalidOutcome::Ready { revision: 0 }).unwrap()
+        )
+        .is_err()
+    );
+
+    let expected = request(BackendOperation::BootstrapDirectory).expected_response();
+    let oversized = rockbee_raft_protocol::Failure {
+        reason: rockbee_raft_protocol::FailureReason::Internal,
+        message: "x".repeat(rockbee_raft_protocol::MAX_MESSAGE_BYTES + 1),
+    };
+    for outcome in [
+        BootstrapOutcome::Conflict(oversized.clone()),
+        BootstrapOutcome::NotSubmitted(oversized.clone()),
+        BootstrapOutcome::Unknown(oversized),
+    ] {
+        assert!(
+            BackendRequest::validate_response(
+                expected,
+                &response(BackendReply::Bootstrap(outcome))
+            )
+            .is_err()
+        );
+    }
+    let valid = response(BackendReply::Bootstrap(BootstrapOutcome::Ready {
+        revision: std::num::NonZeroU64::new(u64::MAX).unwrap(),
+    }));
+    let mut wrong = valid.clone();
+    wrong.node_id = NodeId::new(3).unwrap();
+    assert!(BackendRequest::validate_response(expected, &wrong).is_err());
+    wrong = valid;
+    wrong.cluster_id = ClusterId::new([2; 16]).unwrap();
+    assert!(BackendRequest::validate_response(expected, &wrong).is_err());
 }
