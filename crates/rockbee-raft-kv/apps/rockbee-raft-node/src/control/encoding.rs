@@ -1,10 +1,11 @@
 //! Count every output before allocating any framed effect buffer.
 use rockbee_raft_protocol::{GroupId, control::MoveRecord, routing::ClusterDirectory};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::model::{
-    DIRECTORY_KEY, JOB_KEY_PREFIX, MAX_DIRECTORY_BYTES, MAX_JOB_BYTES, METADATA_EFFECT_RESERVATION,
-    MetadataEffect, MetadataError, ORIGIN_KEY,
+    DIRECTORY_KEY, JOB_KEY_PREFIX, MAX_DIRECTORY_BYTES, MAX_JOB_BYTES, MAX_STORED_MOVES_BYTES,
+    METADATA_EFFECT_RESERVATION, MetadataEffect, MetadataError, ORIGIN_KEY, PreparingSuccessor,
+    StoredMoves,
 };
 
 /// Conservative per-effect allowance for generation prefix and native put
@@ -86,7 +87,18 @@ pub(super) fn completion_effects(
     ])
 }
 
+pub(super) fn preparation_effect(
+    group: GroupId,
+    moves: &StoredMoves,
+) -> Result<Vec<MetadataEffect>, MetadataError> {
+    encode_effects(&[PlannedEffect::Stored { group, moves }])
+}
+
 enum PlannedEffect<'a> {
+    Stored {
+        group: GroupId,
+        moves: &'a StoredMoves,
+    },
     Directory {
         key: &'static [u8],
         directory: &'a ClusterDirectory,
@@ -104,6 +116,7 @@ fn encode_effects(plans: &[PlannedEffect<'_>]) -> Result<Vec<MetadataEffect>, Me
     let mut total = 0usize;
     for plan in plans {
         let (key_bytes, value_bytes) = match plan {
+            PlannedEffect::Stored { moves, .. } => (JOB_KEY_PREFIX.len() + 8, stored_size(moves)?),
             PlannedEffect::Directory { key, directory } => {
                 (key.len(), check_size(directory, MAX_DIRECTORY_BYTES)?)
             }
@@ -125,6 +138,10 @@ fn encode_effects(plans: &[PlannedEffect<'_>]) -> Result<Vec<MetadataEffect>, Me
     plans
         .iter()
         .map(|plan| match plan {
+            PlannedEffect::Stored { group, moves } => Ok(MetadataEffect {
+                key: job_key(*group),
+                value: super::model::encode_stored_moves(moves)?,
+            }),
             PlannedEffect::Directory { key, directory } => Ok(MetadataEffect {
                 key: key.to_vec(),
                 value: rockbee_raft_protocol::encode_frame(directory)?,
@@ -135,4 +152,84 @@ fn encode_effects(plans: &[PlannedEffect<'_>]) -> Result<Vec<MetadataEffect>, Me
             }),
         })
         .collect()
+}
+
+// The all-zero first field is invalid as the legacy MoveIntent's MoveJobId.
+// Keep the ordinary four-byte frame; the discriminator belongs to its payload.
+const PREPARED_MARKER: [u8; 16] = [0; 16];
+const PREPARED_VERSION: u8 = 2;
+
+#[derive(Serialize, Deserialize)]
+struct PreparedMoves<First, Preparing> {
+    marker: [u8; 16],
+    version: u8,
+    first: First,
+    preparing: Preparing,
+}
+
+fn prepared_wire<'a>(
+    first: &'a MoveRecord,
+    preparing: &'a PreparingSuccessor,
+) -> PreparedMoves<&'a MoveRecord, &'a PreparingSuccessor> {
+    PreparedMoves {
+        marker: PREPARED_MARKER,
+        version: PREPARED_VERSION,
+        first,
+        preparing,
+    }
+}
+
+pub(super) fn prepared_size(
+    first: &MoveRecord,
+    preparing: &PreparingSuccessor,
+) -> Result<usize, MetadataError> {
+    first.validate()?;
+    preparing.intent.validate()?;
+    check_size(first, MAX_JOB_BYTES)?;
+    check_size(&prepared_wire(first, preparing), MAX_STORED_MOVES_BYTES)
+}
+
+fn stored_size(moves: &StoredMoves) -> Result<usize, MetadataError> {
+    match &moves.preparing {
+        Some(preparing) => prepared_size(&moves.first, preparing),
+        None => {
+            moves.first.validate()?;
+            check_size(&moves.first, MAX_JOB_BYTES)
+        }
+    }
+}
+
+pub(super) fn encode_stored_moves(moves: &StoredMoves) -> Result<Vec<u8>, MetadataError> {
+    stored_size(moves)?;
+    Ok(match &moves.preparing {
+        Some(preparing) => {
+            rockbee_raft_protocol::encode_frame(&prepared_wire(&moves.first, preparing))?
+        }
+        None => rockbee_raft_protocol::encode_frame(&moves.first)?,
+    })
+}
+
+pub(super) fn decode_stored_moves(bytes: &[u8]) -> Result<StoredMoves, MetadataError> {
+    if bytes.len() > MAX_STORED_MOVES_BYTES {
+        return Err(MetadataError::EncodedLimit);
+    }
+    if bytes.get(4..20) == Some(PREPARED_MARKER.as_slice()) {
+        let wire: PreparedMoves<MoveRecord, PreparingSuccessor> =
+            decode_bounded(bytes, MAX_STORED_MOVES_BYTES)?;
+        if wire.marker != PREPARED_MARKER || wire.version != PREPARED_VERSION {
+            return Err(MetadataError::Corrupt("unknown prepared move version"));
+        }
+        prepared_size(&wire.first, &wire.preparing)?;
+        Ok(StoredMoves {
+            first: wire.first,
+            preparing: Some(wire.preparing),
+        })
+    } else {
+        // Only unmarked values can be legacy. A marked parse failure returns
+        // directly, and the actual legacy decoder rejects the reserved zero ID.
+        Ok(StoredMoves {
+            first: decode_bounded(bytes, MAX_JOB_BYTES)?,
+            preparing: None,
+        })
+    }
 }

@@ -6,15 +6,15 @@
 use std::collections::BTreeMap;
 
 use openraft::{EntryPayload, ErrorSubject, ErrorVerb};
-use rockbee_raft_protocol::{GroupId, control::MoveRecord, routing::ClusterDirectory};
+use rockbee_raft_protocol::{GroupId, routing::ClusterDirectory};
 use rocksdb::{SnapshotWithThreadMode, WriteBatch};
 use serde::de::DeserializeOwned;
 
 use super::{Db, Group, PreparedEntry, encode, error, keys, state::StateRecord};
 use crate::{
     control::{
-        DIRECTORY_KEY, JOB_KEY_PREFIX, MAX_DIRECTORY_BYTES, MAX_JOB_BYTES, MetadataCommand,
-        MetadataView, ORIGIN_KEY,
+        DIRECTORY_KEY, JOB_KEY_PREFIX, MAX_DIRECTORY_BYTES, MetadataCommand, MetadataView,
+        ORIGIN_KEY, StoredMoves, decode_stored_moves,
     },
     types::{ApplyResult, Command, StoreError},
 };
@@ -87,7 +87,7 @@ pub(super) fn load_view(
         .as_ref()
         .map_or(0, |directory| usize::from(directory.shard_config.count()));
     let jobs = read_jobs(group, snapshot, generation, limit)?;
-    MetadataView::from_parts(current, origin, jobs).map_err(write_error)
+    MetadataView::from_stored_parts(current, origin, jobs).map_err(write_error)
 }
 
 fn read_value<T: DeserializeOwned>(
@@ -114,7 +114,7 @@ fn read_jobs(
     snapshot: &SnapshotWithThreadMode<'_, Db>,
     generation: u64,
     limit: usize,
-) -> Result<BTreeMap<GroupId, MoveRecord>, StoreError> {
+) -> Result<BTreeMap<GroupId, StoredMoves>, StoreError> {
     let prefix = keys::data(group.id, generation, JOB_KEY_PREFIX);
     let mut iterator = snapshot.raw_iterator_cf(group.cf("state")?);
     iterator.seek(&prefix);
@@ -138,7 +138,7 @@ fn read_jobs(
             .ok_or_else(|| write_error("metadata iterator has no value"))?;
         // Bounds are checked while the native iterator lends its bytes, before
         // serde decodes or the iterator advances; no serialized Vec is made.
-        let record = decode_value(value, MAX_JOB_BYTES)?;
+        let record = decode_stored_moves(value).map_err(write_error)?;
         jobs.insert(group_id, record);
         iterator.next();
     }

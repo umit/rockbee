@@ -16,6 +16,8 @@ use rockbee_raft_protocol::{
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
+mod successor;
+
 fn identity() -> StorageIdentity {
     StorageIdentity {
         cluster_id: ClusterId::new([2; 16]).unwrap(),

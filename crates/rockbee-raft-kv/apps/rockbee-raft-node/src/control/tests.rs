@@ -814,3 +814,5 @@ fn maximum_directory_and_job_shapes_fit_framed_and_effect_reservations() {
     );
     assert_eq!(encoding::initialize_effects(&directory).unwrap().len(), 2);
 }
+
+mod successor;

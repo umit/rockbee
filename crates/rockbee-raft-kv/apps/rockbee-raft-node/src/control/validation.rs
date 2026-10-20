@@ -1,4 +1,4 @@
-//! Cross-record invariants for the immutable-once movement milestone.
+//! Cross-record invariants for the first move and one frozen preparation.
 use std::collections::BTreeMap;
 
 use rockbee_raft_protocol::{
@@ -9,12 +9,12 @@ use rockbee_raft_protocol::{
 
 use super::{
     encoding::check_size,
-    model::{MAX_DIRECTORY_BYTES, MAX_JOB_BYTES, MetadataError, MetadataView},
+    model::{MAX_DIRECTORY_BYTES, MAX_JOB_BYTES, MetadataError, MetadataView, PreparingSuccessor},
 };
 
 pub(super) fn validate_view(view: &MetadataView) -> Result<(), MetadataError> {
     let Some(current) = &view.current else {
-        return if view.origin.is_none() && view.jobs.is_empty() {
+        return if view.origin.is_none() && view.jobs.is_empty() && view.preparing.is_empty() {
             Ok(())
         } else {
             Err(MetadataError::Corrupt("records without current directory"))
@@ -24,7 +24,10 @@ pub(super) fn validate_view(view: &MetadataView) -> Result<(), MetadataError> {
     let Some(origin) = &view.origin else {
         // The old bootstrap wrote only a framed revision-one directory. Its
         // exact configured origin can be adopted, but no move can begin yet.
-        return if validate_bootstrap_shape(current).is_ok() && view.jobs.is_empty() {
+        return if validate_bootstrap_shape(current).is_ok()
+            && view.jobs.is_empty()
+            && view.preparing.is_empty()
+        {
             Ok(())
         } else {
             Err(MetadataError::Corrupt(
@@ -43,7 +46,8 @@ pub(super) fn validate_view(view: &MetadataView) -> Result<(), MetadataError> {
     validate_jobs(view, current, origin)?;
     validate_catalog(current, origin, &view.jobs)?;
     validate_placements(current, origin, &view.jobs)?;
-    validate_union(current, &view.jobs, None)
+    validate_preparations(view, current)?;
+    validate_union(current, &view.jobs, &view.preparing, None)
 }
 
 fn validate_directory(directory: &ClusterDirectory) -> Result<(), MetadataError> {
@@ -118,6 +122,66 @@ fn validate_jobs(
     Ok(())
 }
 
+fn validate_preparations(
+    view: &MetadataView,
+    current: &ClusterDirectory,
+) -> Result<(), MetadataError> {
+    for (group, preparing) in &view.preparing {
+        let first = view
+            .jobs
+            .get(group)
+            .ok_or(MetadataError::Corrupt("preparation lacks first move"))?;
+        let intent = &preparing.intent;
+        intent.validate()?;
+        if !matches!(first.progress, MoveProgress::Completed { .. })
+            || intent.data_group != *group
+            || intent.job_id == first.intent.job_id
+            || intent.expected_directory_revision <= first.intent.expected_directory_revision
+            || intent.expected_directory_revision > current.revision
+            || intent.old_voters != first.intent.target_voters
+            || !same_voters(current.voters(*group), &intent.old_voters)
+        {
+            return Err(MetadataError::Corrupt(
+                "preparation does not follow completed first move",
+            ));
+        }
+        if preparing.executors != predecessor_executors(current, first)? {
+            return Err(MetadataError::Corrupt(
+                "preparation executor census differs from predecessor",
+            ));
+        }
+        super::encoding::prepared_size(first, preparing)?;
+    }
+    Ok(())
+}
+
+/// For the first move only, old voters plus its sole added node exhaust every
+/// possible native executor. Resolve all four from retained exact endpoints.
+pub(super) fn predecessor_executors(
+    current: &ClusterDirectory,
+    first: &MoveRecord,
+) -> Result<[NodeEndpoint; 4], MetadataError> {
+    let [a, b, c] = first.intent.old_voters;
+    let mut ids = [a, b, c, first.intent.add_node.node_id];
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(MetadataError::Corrupt(
+            "predecessor does not have four executors",
+        ));
+    }
+    let endpoint = |id| {
+        current.node(id).cloned().ok_or(MetadataError::Corrupt(
+            "predecessor executor endpoint is absent",
+        ))
+    };
+    Ok([
+        endpoint(ids[0])?,
+        endpoint(ids[1])?,
+        endpoint(ids[2])?,
+        endpoint(ids[3])?,
+    ])
+}
+
 fn validate_catalog(
     current: &ClusterDirectory,
     origin: &ClusterDirectory,
@@ -185,6 +249,7 @@ pub(super) fn same_voters(actual: Option<&[NodeId]>, expected: &[NodeId]) -> boo
 pub(super) fn validate_union(
     current: &ClusterDirectory,
     jobs: &BTreeMap<GroupId, MoveRecord>,
+    preparing: &BTreeMap<GroupId, PreparingSuccessor>,
     prospective: Option<&NodeEndpoint>,
 ) -> Result<(), MetadataError> {
     let mut nodes = BTreeMap::new();
@@ -192,6 +257,11 @@ pub(super) fn validate_union(
         .nodes
         .iter()
         .chain(jobs.values().map(|record| &record.intent.add_node))
+        .chain(
+            preparing
+                .values()
+                .map(|candidate| &candidate.intent.add_node),
+        )
         .chain(prospective)
     {
         insert_endpoint(&mut nodes, endpoint)?;
