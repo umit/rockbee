@@ -17,7 +17,10 @@ use rockbee_raft_protocol::{
     routing::ClusterDirectory,
     transport::server::RequestHandler,
 };
-use tokio::time::{Instant, sleep_until};
+use tokio::{
+    sync::{Semaphore, TryAcquireError},
+    time::{Instant, sleep_until},
+};
 
 use crate::{
     config::validate_metadata_candidate,
@@ -31,6 +34,64 @@ use crate::{
 pub(super) struct HostedGroup {
     pub raft: Raft<TypeConfig>,
     pub reader: StateReader,
+    /// Held by actual native KV calls, including after their callers disappear.
+    pub mutation_admission: Arc<Semaphore>,
+}
+
+/// Test-only actual Raft proposal observations for one hosted group.
+#[cfg(all(test, feature = "diagnostics"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ProposalSnapshot {
+    pub(crate) entered: usize,
+    pub(crate) completed: usize,
+    pub(crate) active: usize,
+    pub(crate) dropped_before_completion: usize,
+}
+
+#[cfg(all(test, feature = "diagnostics"))]
+struct ProposalCounters {
+    entered: AtomicUsize,
+    completed: AtomicUsize,
+    active: AtomicUsize,
+    dropped_before_completion: AtomicUsize,
+}
+
+#[cfg(all(test, feature = "diagnostics"))]
+impl ProposalCounters {
+    fn snapshot(&self) -> ProposalSnapshot {
+        ProposalSnapshot {
+            entered: self.entered.load(Ordering::Relaxed),
+            completed: self.completed.load(Ordering::Relaxed),
+            active: self.active.load(Ordering::Relaxed),
+            dropped_before_completion: self.dropped_before_completion.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "diagnostics"))]
+struct ProposalGuard<'a> {
+    counters: &'a ProposalCounters,
+    completed: bool,
+}
+
+#[cfg(all(test, feature = "diagnostics"))]
+impl ProposalGuard<'_> {
+    fn complete(&mut self) {
+        self.counters.completed.fetch_add(1, Ordering::Relaxed);
+        self.completed = true;
+    }
+}
+
+#[cfg(all(test, feature = "diagnostics"))]
+impl Drop for ProposalGuard<'_> {
+    fn drop(&mut self) {
+        self.counters.active.fetch_sub(1, Ordering::Relaxed);
+        if !self.completed {
+            self.counters
+                .dropped_before_completion
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// The node's application service; peer RPC and public client requests stay separate.
@@ -49,6 +110,9 @@ pub struct NodeService {
     /// the one actual user mutation across the three replicas.
     #[cfg(test)]
     client_write_calls: Arc<AtomicUsize>,
+    /// Fixed to the finite hosted-group map; never keyed by request or value.
+    #[cfg(all(test, feature = "diagnostics"))]
+    proposals: Arc<BTreeMap<GroupId, ProposalCounters>>,
 }
 
 impl NodeService {
@@ -61,6 +125,24 @@ impl NodeService {
         groups: BTreeMap<GroupId, HostedGroup>,
         metadata_seeds: Vec<crate::config::JoinSeed>,
     ) -> Self {
+        #[cfg(all(test, feature = "diagnostics"))]
+        let proposals = Arc::new(
+            groups
+                .keys()
+                .copied()
+                .map(|id| {
+                    (
+                        id,
+                        ProposalCounters {
+                            entered: AtomicUsize::new(0),
+                            completed: AtomicUsize::new(0),
+                            active: AtomicUsize::new(0),
+                            dropped_before_completion: AtomicUsize::new(0),
+                        },
+                    )
+                })
+                .collect(),
+        );
         Self {
             identity,
             shard_config,
@@ -72,6 +154,8 @@ impl NodeService {
             movement: Arc::new(super::movement::MoveRunners::new()),
             #[cfg(test)]
             client_write_calls: Arc::new(AtomicUsize::new(0)),
+            #[cfg(all(test, feature = "diagnostics"))]
+            proposals,
         }
     }
 
@@ -79,6 +163,15 @@ impl NodeService {
     #[cfg(test)]
     pub(crate) fn test_client_write_calls(&self) -> usize {
         self.client_write_calls.load(Ordering::Relaxed)
+    }
+
+    /// Returns actual `client_write` entry/completion state for one hosted group.
+    #[cfg(all(test, feature = "diagnostics"))]
+    pub(crate) fn test_proposals(&self, group: GroupId) -> ProposalSnapshot {
+        self.proposals
+            .get(&group)
+            .map(ProposalCounters::snapshot)
+            .expect("test proposal group must be hosted")
     }
 
     pub(super) fn leader_hint(&self, group: GroupId) -> Option<NodeId> {
@@ -322,6 +415,21 @@ impl NodeService {
                 "not the observed leader before submission",
             ));
         }
+        let _admission = match group.mutation_admission.try_acquire() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::NoPermits) => {
+                return MutationOutcome::Rejected(failure(
+                    FailureReason::Overloaded,
+                    "group native mutation capacity is full",
+                ));
+            }
+            Err(TryAcquireError::Closed) => {
+                return MutationOutcome::Rejected(failure(
+                    FailureReason::Unavailable,
+                    "group native mutation admission is closed",
+                ));
+            }
+        };
         // After invoking client_write, even ForwardToLeader can refer to a
         // previously appended proposal. No error here proves safe rejection.
         // Do not cancel this future on the caller's timeout: the server's global
@@ -331,7 +439,17 @@ impl NodeService {
         // does not include metadata initialization.
         #[cfg(test)]
         self.client_write_calls.fetch_add(1, Ordering::Relaxed);
-        match group.raft.client_write(command).await {
+        #[cfg(all(test, feature = "diagnostics"))]
+        let mut proposal = self.enter_proposal(id);
+        let result = group.raft.client_write(command).await;
+        // Seal the group before this call's permit can be recycled. An invoked
+        // proposal still has Unknown certainty on error, including Fatal.
+        if matches!(&result, Err(RaftError::Fatal(_))) {
+            group.mutation_admission.close();
+        }
+        #[cfg(all(test, feature = "diagnostics"))]
+        proposal.complete();
+        match result {
             Ok(_) => {
                 trace!(
                     "raft_mutation_committed node={} group={}",
@@ -349,6 +467,20 @@ impl NodeService {
                 );
                 MutationOutcome::Unknown(failure(FailureReason::Unavailable, error))
             }
+        }
+    }
+
+    #[cfg(all(test, feature = "diagnostics"))]
+    fn enter_proposal(&self, group: GroupId) -> ProposalGuard<'_> {
+        let counters = self
+            .proposals
+            .get(&group)
+            .expect("actual proposal group must be hosted");
+        counters.entered.fetch_add(1, Ordering::Relaxed);
+        counters.active.fetch_add(1, Ordering::Relaxed);
+        ProposalGuard {
+            counters,
+            completed: false,
         }
     }
 }

@@ -109,6 +109,38 @@ async fn start<H: RequestHandler<Request = KvRequest, Response = KvResponse>>(
     (Server::start(listener, config, handler).unwrap(), address)
 }
 
+#[cfg(feature = "diagnostics")]
+#[tokio::test]
+async fn diagnostics_snapshot_exposes_the_configured_idle_admission_budgets() {
+    let config = ServerConfig {
+        max_connections: 3,
+        max_outstanding: 5,
+        request_bytes: 8 * 1024 * 1024,
+        response_bytes: 8 * 1024 * 1024,
+        ..ServerConfig::default()
+    };
+    let handler = Arc::new(Echo {
+        calls: AtomicUsize::new(0),
+        release: Arc::new(Notify::new()),
+        wait: false,
+    });
+    let (mut server, _) = start(handler, config).await;
+    assert_eq!(
+        server.admission_snapshot(),
+        rockbee_raft_protocol::transport::server::ServerAdmissionSnapshot {
+            connections_configured: config.max_connections,
+            connections_available: config.max_connections,
+            operations_configured: config.max_outstanding,
+            operations_available: config.max_outstanding,
+            request_bytes_configured: config.request_bytes,
+            request_bytes_available: config.request_bytes,
+            response_bytes_configured: config.response_bytes,
+            response_bytes_available: config.response_bytes,
+        }
+    );
+    server.close().await;
+}
+
 async fn send(stream: &mut TcpStream, id: u64, key: &'static [u8]) {
     stream.write_all(&request_frame(id, key)).await.unwrap();
 }

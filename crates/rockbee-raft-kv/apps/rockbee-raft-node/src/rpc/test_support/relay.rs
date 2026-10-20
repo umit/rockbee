@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use rockbee_raft_protocol::{ClusterId, NodeId};
+use rockbee_raft_protocol::{ClusterId, GroupId, NodeId};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
     net::{TcpListener, TcpStream},
@@ -34,9 +34,12 @@ pub(super) struct State {
     next_connection: u64,
     pub(super) blocked: BTreeSet<NodeId>,
     pub(super) blocked_edges: BTreeSet<(NodeId, NodeId)>,
+    pub(super) blocked_groups: BTreeSet<GroupId>,
     connections: BTreeMap<u64, Connection>,
     pub(super) dispatches: BTreeMap<(NodeId, NodeId), usize>,
     pub(super) admitted: BTreeMap<(NodeId, NodeId), u64>,
+    pub(super) group_dispatches:
+        BTreeMap<(GroupId, NodeId, NodeId), super::dispatch::GroupDispatchCounts>,
 }
 
 #[derive(Default)]
@@ -70,6 +73,21 @@ pub(crate) struct EdgeCutAck {
     pub(crate) earlier_dispatches: usize,
 }
 
+/// A receiver seal across every edge of one group, not a socket cut.
+#[derive(Debug)]
+pub(crate) struct GroupCutInstall {
+    pub(crate) generation: u64,
+    pub(crate) group_id: GroupId,
+}
+
+/// Earlier native dispatches drained while this exact group seal remained set.
+#[derive(Debug)]
+pub(crate) struct GroupCutAck {
+    pub(crate) generation: u64,
+    pub(crate) group_id: GroupId,
+    pub(crate) earlier_dispatches: usize,
+}
+
 /// All advertised peer listeners and their bounded, joined forwarding tasks.
 /// Backend listeners are deliberately outside this owner.
 pub(crate) struct PeerRelays {
@@ -80,6 +98,45 @@ pub(crate) struct PeerRelays {
 }
 
 impl PeerRelays {
+    /// Seal every decoded request of this group immediately before native RPC
+    /// admission. Pooled sockets can carry other groups and are not aborted.
+    pub(crate) fn install_group_cut(&self, group_id: GroupId) -> GroupCutInstall {
+        let mut state = self.shared.state.lock().unwrap();
+        state.generation += 1;
+        state.blocked_groups.insert(group_id);
+        GroupCutInstall {
+            generation: state.generation,
+            group_id,
+        }
+    }
+
+    pub(crate) async fn drain_group_cut(&self, installed: &GroupCutInstall) -> GroupCutAck {
+        loop {
+            let changed = self.shared.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let earlier_dispatches = {
+                let state = self.shared.state.lock().unwrap();
+                assert_eq!(state.generation, installed.generation);
+                assert!(state.blocked_groups.contains(&installed.group_id));
+                state
+                    .group_dispatches
+                    .iter()
+                    .filter(|((group, _, _), _)| *group == installed.group_id)
+                    .map(|(_, counts)| counts.active)
+                    .sum::<usize>()
+            };
+            if earlier_dispatches == 0 {
+                return GroupCutAck {
+                    generation: installed.generation,
+                    group_id: installed.group_id,
+                    earlier_dispatches,
+                };
+            }
+            changed.await;
+        }
+    }
+
     /// Atomically seals the complete edge set and aborts affected sockets.
     /// This receipt does not claim that their owners or native RPCs have drained.
     pub(crate) fn install_edge_cut(
@@ -242,6 +299,9 @@ impl PeerRelays {
         state.generation += 1;
         state.blocked.clear();
         state.blocked_edges.clear();
+        state.blocked_groups.clear();
+        drop(state);
+        self.shared.changed.notify_waiters();
     }
 
     pub(crate) async fn close(&mut self) {

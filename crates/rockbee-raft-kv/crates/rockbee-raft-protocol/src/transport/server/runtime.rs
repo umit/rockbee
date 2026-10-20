@@ -49,6 +49,33 @@ pub trait RequestHandler: Send + Sync + 'static {
 pub struct Server {
     stop: watch::Sender<bool>,
     accept: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(feature = "diagnostics")]
+    limits: Arc<Limits>,
+}
+
+/// A point-in-time view of admission permits owned by one server.
+///
+/// Each semaphore is sampled separately. This is an admission diagnostic, not
+/// an atomic cross-limit snapshot or a measure of process RSS.
+#[cfg(feature = "diagnostics")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ServerAdmissionSnapshot {
+    /// Configured connection permits.
+    pub connections_configured: usize,
+    /// Separately sampled available connection permits.
+    pub connections_available: usize,
+    /// Configured accepted-operation permits.
+    pub operations_configured: usize,
+    /// Separately sampled available operation permits.
+    pub operations_available: usize,
+    /// Configured retained request-byte permits.
+    pub request_bytes_configured: usize,
+    /// Separately sampled available request-byte permits.
+    pub request_bytes_available: usize,
+    /// Configured reserved response-byte permits.
+    pub response_bytes_configured: usize,
+    /// Separately sampled available response-byte permits.
+    pub response_bytes_available: usize,
 }
 
 impl Server {
@@ -72,12 +99,19 @@ impl Server {
         log::info!("raft transport server listening local={local:?}");
         let (stop, receiver) = watch::channel(false);
         let limits = Arc::new(Limits::new(config));
+        let accept_limits = Arc::clone(&limits);
         let accept = tokio::spawn(accept_connections(
-            listener, receiver, config, limits, handler,
+            listener,
+            receiver,
+            config,
+            accept_limits,
+            handler,
         ));
         Ok(Self {
             stop,
             accept: Mutex::new(Some(accept)),
+            #[cfg(feature = "diagnostics")]
+            limits,
         })
     }
 
@@ -100,6 +134,12 @@ impl Server {
         accept.take();
         log::info!("raft transport server closed");
     }
+
+    /// Returns configured and presently available admission permits.
+    #[cfg(feature = "diagnostics")]
+    pub fn admission_snapshot(&self) -> ServerAdmissionSnapshot {
+        self.limits.snapshot()
+    }
 }
 
 impl Drop for Server {
@@ -121,6 +161,8 @@ struct Limits {
     operations: Arc<Semaphore>,
     request_bytes: Arc<Semaphore>,
     response_bytes: Arc<Semaphore>,
+    #[cfg(feature = "diagnostics")]
+    configured: ServerAdmissionSnapshot,
 }
 
 impl Limits {
@@ -130,6 +172,28 @@ impl Limits {
             operations: Arc::new(Semaphore::new(config.max_outstanding)),
             request_bytes: Arc::new(Semaphore::new(config.request_bytes)),
             response_bytes: Arc::new(Semaphore::new(config.response_bytes)),
+            #[cfg(feature = "diagnostics")]
+            configured: ServerAdmissionSnapshot {
+                connections_configured: config.max_connections,
+                connections_available: 0,
+                operations_configured: config.max_outstanding,
+                operations_available: 0,
+                request_bytes_configured: config.request_bytes,
+                request_bytes_available: 0,
+                response_bytes_configured: config.response_bytes,
+                response_bytes_available: 0,
+            },
+        }
+    }
+
+    #[cfg(feature = "diagnostics")]
+    fn snapshot(&self) -> ServerAdmissionSnapshot {
+        ServerAdmissionSnapshot {
+            connections_available: self.connections.available_permits(),
+            operations_available: self.operations.available_permits(),
+            request_bytes_available: self.request_bytes.available_permits(),
+            response_bytes_available: self.response_bytes.available_permits(),
+            ..self.configured
         }
     }
 }

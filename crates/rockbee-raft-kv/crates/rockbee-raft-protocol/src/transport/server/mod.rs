@@ -17,4 +17,6 @@ mod config;
 mod runtime;
 
 pub use config::{ServerConfig, ServerConfigError};
+#[cfg(feature = "diagnostics")]
+pub use runtime::ServerAdmissionSnapshot;
 pub use runtime::{RequestHandler, Server, ServerError};

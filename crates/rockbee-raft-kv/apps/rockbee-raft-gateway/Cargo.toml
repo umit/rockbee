@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Gateway application for the independent Rockbee Raft KV workspace"
 
+[features]
+diagnostics = ["rockbee-raft-protocol/diagnostics"]
+
 [dependencies]
 log.workspace = true
 env_logger.workspace = true

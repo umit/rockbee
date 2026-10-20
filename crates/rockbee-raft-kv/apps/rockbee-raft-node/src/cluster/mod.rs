@@ -1,5 +1,8 @@
 //! Process lifecycle and group orchestration; storage and RPC keep their own jobs.
+mod admission;
 mod bootstrap;
+#[cfg(all(test, feature = "diagnostics"))]
+mod group_isolation_tests;
 mod join;
 mod movement;
 #[cfg(test)]
@@ -378,9 +381,12 @@ async fn start_groups(
     } else {
         1
     };
+    let hosted_groups = usize::try_from(u64::from(config.shard_config.count()) + 1 - first)
+        .map_err(|_| NodeError::Config("hosted group count exceeds this platform".into()))?;
+    let mutation_capacity = admission::mutation_capacity(config.server, hosted_groups);
     for index in first..=u64::from(config.shard_config.count()) {
         let id = GroupId::new(index);
-        let result = start_group(config, storage, identity, resources, id).await;
+        let result = start_group(config, storage, identity, resources, id, mutation_capacity).await;
         match result {
             Ok(group) => {
                 groups.insert(id, group);
@@ -400,6 +406,7 @@ async fn start_group(
     identity: PeerIdentity,
     resources: &Arc<PeerResources>,
     id: GroupId,
+    mutation_capacity: usize,
 ) -> Result<HostedGroup, NodeError> {
     let stores = storage.open_group(id)?;
     let reader = stores.state_machine.reader();
@@ -421,7 +428,11 @@ async fn start_group(
     )
     .await
     .map_err(|error| NodeError::Raft(error.to_string()))?;
-    Ok(HostedGroup { raft, reader })
+    Ok(HostedGroup {
+        raft,
+        reader,
+        mutation_admission: Arc::new(tokio::sync::Semaphore::new(mutation_capacity)),
+    })
 }
 
 async fn stop_groups(groups: &BTreeMap<GroupId, HostedGroup>) {

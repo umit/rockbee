@@ -6,6 +6,9 @@ license.workspace = true
 publish.workspace = true
 description = "Public wire protocol for the independent Rockbee Raft KV workspace"
 
+[features]
+diagnostics = []
+
 [dependencies]
 log.workspace = true
 bytes.workspace = true

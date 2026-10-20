@@ -25,6 +25,100 @@ use crate::rpc::{
 };
 
 #[tokio::test]
+async fn group_cut_drains_only_its_native_owners_and_heal_restores_admission() {
+    let cluster = ClusterId::new([109; 16]).unwrap();
+    let source = NodeId::new(1).unwrap();
+    let target = NodeId::new(2).unwrap();
+    let blocked = GroupId::new(1);
+    let sibling = GroupId::new(2);
+    let metadata = GroupId::new(0);
+    let mut relays = PeerRelays::start(cluster, vec![], PeerLimits::default());
+    let tracker = relays.dispatch_tracker();
+    let header = |group| PeerHeader::request(cluster, source, target, group, PeerKind::Vote);
+    let original = tracker.try_admit(&header(blocked)).unwrap();
+    let installed = relays.install_group_cut(blocked);
+    assert!(tracker.try_admit(&header(blocked)).is_err());
+    // The same peer edge can carry another group on its pooled connection.
+    let sibling_owner = tracker.try_admit(&header(sibling)).unwrap();
+    let metadata_owner = tracker.try_admit(&header(metadata)).unwrap();
+    let first = {
+        let mut drain = std::pin::pin!(relays.drain_group_cut(&installed));
+        std::future::poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx))).await
+    };
+    assert!(
+        first.is_pending(),
+        "a seal cannot release an invoked native owner"
+    );
+    let counts = tracker.group_edge_counts(blocked, source, target);
+    assert_eq!(counts.active, 1);
+    assert_eq!(counts.admitted, 1);
+    assert_eq!(counts.rejected, 1);
+    assert_eq!(tracker.active_for(target), 3);
+    drop(original);
+    let ack = timeout(Duration::from_secs(2), relays.drain_group_cut(&installed))
+        .await
+        .unwrap();
+    assert_eq!(ack.generation, installed.generation);
+    assert_eq!(ack.group_id, blocked);
+    assert_eq!(ack.earlier_dispatches, 0);
+    assert_eq!(tracker.group_counts(blocked).active, 0);
+    assert_eq!(tracker.group_counts(sibling).active, 1);
+    assert_eq!(tracker.group_counts(metadata).active, 1);
+    assert!(tracker.try_admit(&header(blocked)).is_err());
+    relays.heal();
+    let healed = tracker.try_admit(&header(blocked)).unwrap();
+    let counts = tracker.group_counts(blocked);
+    assert_eq!(counts.active, 1);
+    assert_eq!(counts.admitted, 2);
+    assert_eq!(counts.rejected, 2);
+    drop(healed);
+    drop(sibling_owner);
+    drop(metadata_owner);
+    assert_eq!(tracker.active_for(target), 0);
+    assert_eq!(tracker.admitted_for(target), 4);
+    relays.close().await;
+}
+
+#[test]
+fn group_dispatch_counts_distinguish_group_and_directed_edge() {
+    let tracker = super::DispatchTracker::new(Arc::new(super::relay::Shared::default()));
+    let cluster = ClusterId::new([110; 16]).unwrap();
+    let a = NodeId::new(1).unwrap();
+    let b = NodeId::new(2).unwrap();
+    let first = GroupId::new(1);
+    let second = GroupId::new(2);
+    let admit = |group, source, target| {
+        tracker
+            .try_admit(&PeerHeader::request(
+                cluster,
+                source,
+                target,
+                group,
+                PeerKind::Vote,
+            ))
+            .unwrap()
+    };
+    let forward = admit(first, a, b);
+    let reverse = admit(first, b, a);
+    let sibling = admit(second, a, b);
+    assert_eq!(tracker.group_counts(first).active, 2);
+    assert_eq!(tracker.group_counts(second).active, 1);
+    assert_eq!(tracker.group_edge_counts(first, a, b).admitted, 1);
+    assert_eq!(tracker.group_edge_counts(first, b, a).admitted, 1);
+    assert_eq!(tracker.group_edge_counts(second, b, a).admitted, 0);
+    drop(forward);
+    assert_eq!(tracker.group_edge_counts(first, a, b).active, 0);
+    assert_eq!(tracker.group_edge_counts(first, b, a).active, 1);
+    assert_eq!(tracker.group_edge_counts(second, a, b).active, 1);
+    drop(reverse);
+    drop(sibling);
+    assert_eq!(tracker.group_counts(first).active, 0);
+    assert_eq!(tracker.group_counts(first).admitted, 2);
+    assert_eq!(tracker.group_counts(second).active, 0);
+    assert_eq!(tracker.admitted_for(a), 3);
+}
+
+#[tokio::test]
 async fn atomic_edge_cut_preserves_internal_streams_and_drains_cross_dispatch() {
     let cluster = ClusterId::new([108; 16]).unwrap();
     let ids: Vec<_> = (1..=4).map(|id| NodeId::new(id).unwrap()).collect();

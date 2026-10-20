@@ -665,6 +665,14 @@ impl GatewayRuntime {
     pub fn gateway(&self) -> &Gateway {
         &self.gateway
     }
+
+    /// Returns the public server admission state for bounded test diagnostics.
+    #[cfg(feature = "diagnostics")]
+    pub fn admission_snapshot(
+        &self,
+    ) -> rockbee_raft_protocol::transport::server::ServerAdmissionSnapshot {
+        self.server.admission_snapshot()
+    }
 }
 
 fn operation_name(request: &KvRequest) -> &'static str {

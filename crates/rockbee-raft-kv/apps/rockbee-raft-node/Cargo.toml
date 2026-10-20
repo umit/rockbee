@@ -8,7 +8,10 @@ description = "Storage node for the independent Rockbee Raft KV workspace"
 
 [features]
 # Opt-in investigation only; ordinary builds have no recorder or observer tasks.
-diagnostics = []
+diagnostics = [
+  "rockbee-raft-protocol/diagnostics",
+  "rockbee-raft-gateway/diagnostics",
+]
 
 [dependencies]
 log.workspace = true
