@@ -2,6 +2,8 @@
 mod bootstrap;
 mod join;
 mod movement;
+#[cfg(test)]
+mod public_reply_loss_tests;
 mod service;
 
 use std::{collections::BTreeMap, sync::Arc};

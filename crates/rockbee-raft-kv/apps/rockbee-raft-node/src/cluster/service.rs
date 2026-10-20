@@ -1,5 +1,8 @@
 //! Backend operations translate to explicit authority checks and Raft calls.
-use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc, time::Duration};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use log::{debug, trace, warn};
@@ -40,7 +43,12 @@ pub struct NodeService {
     pub(super) peers: PeerLimits,
     pub(super) groups: BTreeMap<GroupId, HostedGroup>,
     pub(super) metadata_seeds: Vec<crate::config::JoinSeed>,
-    pub(super) movement: std::sync::Arc<super::movement::MoveRunners>,
+    pub(super) movement: Arc<super::movement::MoveRunners>,
+    /// Test-only observation of public KV proposal admission. Metadata bootstrap
+    /// deliberately bypasses this scalar so a response-loss fixture can count
+    /// the one actual user mutation across the three replicas.
+    #[cfg(test)]
+    client_write_calls: Arc<AtomicUsize>,
 }
 
 impl NodeService {
@@ -61,8 +69,16 @@ impl NodeService {
             peers,
             groups,
             metadata_seeds,
-            movement: std::sync::Arc::new(super::movement::MoveRunners::new()),
+            movement: Arc::new(super::movement::MoveRunners::new()),
+            #[cfg(test)]
+            client_write_calls: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Returns only actual KV `client_write` entries for a fixture-owned node.
+    #[cfg(test)]
+    pub(crate) fn test_client_write_calls(&self) -> usize {
+        self.client_write_calls.load(Ordering::Relaxed)
     }
 
     pub(super) fn leader_hint(&self, group: GroupId) -> Option<NodeId> {
@@ -310,6 +326,11 @@ impl NodeService {
         // previously appended proposal. No error here proves safe rejection.
         // Do not cancel this future on the caller's timeout: the server's global
         // request permit remains held until the actual Raft call resolves.
+        // Count after every local rejection guard but immediately before the
+        // real public KV submission. This is not a Raft-log-entry count and
+        // does not include metadata initialization.
+        #[cfg(test)]
+        self.client_write_calls.fetch_add(1, Ordering::Relaxed);
         match group.raft.client_write(command).await {
             Ok(_) => {
                 trace!(

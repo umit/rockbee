@@ -192,6 +192,154 @@ async fn failed_native_append_never_completes_successfully() {
     );
 }
 
+/// A native vote write failure retires the affected in-memory group's writes.
+/// Its durable vote/data and the sibling's durable state remain recoverable;
+/// a shared read-only DB does not prove sibling write availability.
+#[tokio::test]
+async fn failed_native_vote_write_retires_group_and_preserves_durable_groups() {
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("rockbee_raft_node::storage=debug"),
+    )
+    .is_test(true)
+    .try_init();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let mut storage = Storage::open(
+        path.clone(),
+        identity(),
+        StorageOptions::default(),
+        OpenMode::CreateNew,
+    )
+    .await
+    .unwrap();
+    let group_one = GroupId::new(1);
+    let group_two = GroupId::new(2);
+    let vote_zero = openraft::Vote::new(1, 1);
+    let sibling_vote = openraft::Vote::new(2, 1);
+
+    let mut first = storage.open_group(group_one).unwrap();
+    first.log_store.save_vote(&vote_zero).await.unwrap();
+    first
+        .state_machine
+        .apply([put(1, b"group-one")])
+        .await
+        .unwrap();
+    let first_applied = first.state_machine.applied_state().await.unwrap().0;
+    let first_value = first
+        .state_machine
+        .reader()
+        .read_local(Bytes::from_static(b"key"))
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(
+        first_applied,
+        Some(LogId::new(openraft::CommittedLeaderId::new(1, 1), 1))
+    );
+    assert_eq!(first_value, Some(Bytes::from_static(b"group-one")));
+
+    let mut sibling = storage.open_group(group_two).unwrap();
+    sibling.log_store.save_vote(&sibling_vote).await.unwrap();
+    sibling
+        .state_machine
+        .apply([put(2, b"group-two")])
+        .await
+        .unwrap();
+    let sibling_applied = sibling.state_machine.applied_state().await.unwrap().0;
+    let sibling_value = sibling
+        .state_machine
+        .reader()
+        .read_local(Bytes::from_static(b"key"))
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(
+        sibling_applied,
+        Some(LogId::new(openraft::CommittedLeaderId::new(1, 1), 2))
+    );
+    assert_eq!(sibling_value, Some(Bytes::from_static(b"group-two")));
+
+    // No group owner may retain Shared while the fixture swaps the one DB
+    // handle for RocksDB's real read-only handle.
+    drop(first);
+    drop(sibling);
+    let readonly = Db::open_cf_for_read_only(&Options::default(), &path, CF_NAMES, false).unwrap();
+    Arc::get_mut(&mut storage.shared)
+        .expect("dropped groups leave the shared DB uniquely owned")
+        .db = Arc::new(readonly);
+
+    let mut failed = storage.open_group(group_one).unwrap();
+    let error = failed
+        .log_store
+        .save_vote(&openraft::Vote::new(2, 1))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("read only") || error.to_string().contains("read-only"),
+        "{error}"
+    );
+    let retired = failed
+        .log_store
+        .save_vote(&openraft::Vote::new(3, 1))
+        .await
+        .unwrap_err();
+    assert!(
+        retired
+            .to_string()
+            .contains("group write admission retired"),
+        "{retired}"
+    );
+
+    drop(failed);
+    drop(storage);
+    let storage = Storage::open(
+        path,
+        identity(),
+        StorageOptions::default(),
+        OpenMode::OpenExisting,
+    )
+    .await
+    .unwrap();
+    let mut first = storage.open_group(group_one).unwrap();
+    let mut sibling = storage.open_group(group_two).unwrap();
+    assert_eq!(first.log_store.read_vote().await.unwrap(), Some(vote_zero));
+    assert_eq!(
+        first.state_machine.applied_state().await.unwrap().0,
+        first_applied
+    );
+    assert_eq!(
+        first
+            .state_machine
+            .reader()
+            .read_local(Bytes::from_static(b"key"))
+            .await
+            .unwrap()
+            .value,
+        first_value
+    );
+    assert_eq!(
+        sibling.log_store.read_vote().await.unwrap(),
+        Some(sibling_vote)
+    );
+    assert_eq!(
+        sibling.state_machine.applied_state().await.unwrap().0,
+        sibling_applied
+    );
+    assert_eq!(
+        sibling
+            .state_machine
+            .reader()
+            .read_local(Bytes::from_static(b"key"))
+            .await
+            .unwrap()
+            .value,
+        sibling_value
+    );
+    ::log::info!(
+        "raft_vote_native_failure_recovery old_vote={vote_zero:?} sibling_vote={sibling_vote:?} group_applied={first_applied:?} sibling_applied={sibling_applied:?} values_preserved=true"
+    );
+}
+
 #[tokio::test]
 async fn failed_membership_chunk_preserves_data_applied_and_membership_together_after_reopen() {
     let dir = tempfile::tempdir().unwrap();

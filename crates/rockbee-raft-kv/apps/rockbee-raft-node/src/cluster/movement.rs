@@ -86,6 +86,8 @@ mod delayed_executor_tests;
 #[cfg(test)]
 mod failure_tests;
 #[cfg(test)]
+mod intermediate_process_tests;
+#[cfg(test)]
 mod joint_partition_tests;
 #[cfg(test)]
 mod tests;
