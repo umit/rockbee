@@ -382,7 +382,7 @@ impl Gateway {
         let is_mutation = !matches!(request, KvRequest::Get { .. });
         let operation = operation_name(&request);
         let mut last_read_failure = None;
-        let mut last_unsent_mutation = None;
+        let mut last_safe_mutation_failure = None;
         // A request refreshes at most once and keeps its original deadline.
         for pass in 0..2 {
             let Some(candidates) = snapshot.voters(group_id) else {
@@ -420,6 +420,15 @@ impl Gateway {
                 match response {
                     Ok(KvResponse::Mutation(MutationOutcome::Rejected(failure)))
                         if failure.reason == FailureReason::NotLeader => {}
+                    Ok(KvResponse::Mutation(MutationOutcome::Rejected(failure)))
+                        if failure.reason == FailureReason::Unavailable =>
+                    {
+                        // A received Rejected outcome proves no consensus
+                        // submission. An unavailable local group does not rule
+                        // out another voter, even while its process is alive.
+                        last_safe_mutation_failure =
+                            Some(KvResponse::Mutation(MutationOutcome::Rejected(failure)));
+                    }
                     Ok(KvResponse::ReadError(ReadFailure(failure)))
                         if matches!(
                             failure.reason,
@@ -448,7 +457,7 @@ impl Gateway {
                         self.metrics.backend_failure();
                         match error.delivery {
                             Delivery::NotSent => {
-                                last_unsent_mutation =
+                                last_safe_mutation_failure =
                                     Some(KvResponse::Mutation(mutation_transport_failure(error)));
                             }
                             Delivery::MayHaveBeenSent => {
@@ -480,7 +489,7 @@ impl Gateway {
             }
         }
         if is_mutation {
-            last_unsent_mutation.unwrap_or_else(|| {
+            last_safe_mutation_failure.unwrap_or_else(|| {
                 rejected(
                     FailureReason::NotLeader,
                     "no candidate accepted the mutation before its deadline",

@@ -5,10 +5,101 @@ use super::{
 };
 use bytes::Bytes;
 use rockbee_raft_protocol::{FailureReason, GroupId, MutationOutcome};
-use std::sync::Arc;
-use tokio::{sync::Mutex, time::sleep};
+use std::{sync::Arc, time::Duration};
+use tokio::{
+    sync::Mutex,
+    time::{Instant, sleep},
+};
 
 const CLOSED_GATE_MESSAGE: &str = "group native mutation admission is closed";
+
+async fn elect_b(resources: &Resources) -> Result<(), String> {
+    let node = &resources.nodes[1];
+    let group = &node.service.groups[&STALLED];
+    // Only B starts elections. C still votes; automatic retries allow A's old
+    // leader lease to expire without treating an elapsed sleep as readiness.
+    group.raft.runtime_config().elect(true);
+    group.raft.trigger().elect().await.map_err(message)?;
+    wait_for("B observes itself as G1 leader", || {
+        node.service.leader_hint(STALLED) == Some(node.service.identity.node_id)
+    })
+    .await?;
+    let applied = super::authority_barrier(STALLED, group, Instant::now() + Duration::from_secs(5))
+        .await
+        .map_err(|error| format!("B G1 authority after A Fatal: {error:?}"))?;
+    log::info!(
+        "raft_fatal_failover_ready group={} leader={} authority_applied={applied:?} directory_revision={} candidates={:?}",
+        STALLED.get(),
+        node.service.identity.node_id.get(),
+        resources.directory.revision,
+        resources.directory.voters(STALLED),
+    );
+    Ok(())
+}
+
+async fn verify_new_mutation_failover(resources: &Resources, client: usize) -> Result<(), String> {
+    elect_b(resources).await?;
+    let a = &resources.nodes[0];
+    if resources
+        .directory
+        .voters(STALLED)
+        .and_then(|voters| voters.first())
+        != Some(&a.service.identity.node_id)
+        || !a.service.groups[&STALLED].mutation_admission.is_closed()
+    {
+        return Err("failover requires unchanged A-first routing and A's closed G1 gate".into());
+    }
+    let before = [0, 1, 2].map(|index| resources.nodes[index].service.test_proposals(STALLED));
+    if before[0].entered != 1 || before[1].entered != 0 || before[2].entered != 0 {
+        return Err(format!("original Unknown must not be replayed: {before:?}"));
+    }
+    let new_key = key(&resources.directory, STALLED, 2);
+    let new_value = Bytes::from_static(b"new-mutation-after-local-fatal");
+    log::info!("raft_fatal_failover_before proposals={before:?}");
+    let outcome = resources.clients[client]
+        .put(new_key.clone(), new_value.clone())
+        .map_err(message)?
+        .await;
+    let read = resources.clients[client].get(new_key).await;
+    let after = [0, 1, 2].map(|index| resources.nodes[index].service.test_proposals(STALLED));
+    // Preserve the actual failing outcome and counters before returning through
+    // the existing outer owner, which closes every resource before asserting.
+    log::info!(
+        "raft_fatal_failover_observed outcome={outcome:?} read={read:?} before={before:?} after={after:?} a_gate_closed={}",
+        a.service.groups[&STALLED].mutation_admission.is_closed(),
+    );
+    authority(a, GroupId::new(0)).await?;
+    authority(a, HEALTHY).await?;
+    healthy_crud(
+        &resources.clients[client],
+        key(&resources.directory, HEALTHY, 3),
+    )
+    .await?;
+    if outcome != MutationOutcome::Committed {
+        return Err(format!(
+            "new public PUT must reach authoritative B after A's safe refusal: {outcome:?}"
+        ));
+    }
+    if read.map_err(message)? != Some(new_value) {
+        return Err("same public client did not read B's committed value".into());
+    }
+    for index in 0..3 {
+        let expected = usize::from(index == 1);
+        if after[index].entered != before[index].entered + expected
+            || after[index].completed != before[index].completed + expected
+            || after[index].active != 0
+            || after[index].dropped_before_completion != 0
+        {
+            return Err(format!(
+                "failover requires exact native deltas A0/B1/C0: before={before:?} after={after:?}"
+            ));
+        }
+    }
+    if !a.service.groups[&STALLED].mutation_admission.is_closed() {
+        return Err("A's failed G1 admission reopened during failover".into());
+    }
+    Ok(())
+}
 
 async fn observe(resources: &mut Resources) -> Result<(), String> {
     let original = resources.client().await?;
@@ -147,7 +238,7 @@ async fn observe(resources: &mut Resources) -> Result<(), String> {
         finished.dropped_before_completion,
         resources.nodes.len(),
     );
-    Ok(())
+    verify_new_mutation_failover(resources, original).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

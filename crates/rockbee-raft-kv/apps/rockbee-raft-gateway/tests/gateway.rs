@@ -464,6 +464,14 @@ struct RefreshState {
     uncertain_mutation: std::sync::atomic::AtomicBool,
     d_unavailable: std::sync::atomic::AtomicBool,
     missing_read: std::sync::atomic::AtomicBool,
+    after_safe_rejection: std::sync::RwLock<Option<AfterSafeRejection>>,
+    kv_attempts: [AtomicUsize; 4],
+}
+
+#[derive(Clone, Copy)]
+enum AfterSafeRejection {
+    Committed,
+    Unknown,
 }
 
 struct RefreshBackend(Arc<RefreshState>);
@@ -502,7 +510,29 @@ impl RequestHandler for RefreshBackend {
                 BackendOperation::Kv {
                     request: operation, ..
                 } => {
-                    let response = if state.missing_read.load(Ordering::SeqCst)
+                    let index = usize::try_from(request.target_node.get() - 1).unwrap();
+                    state.kv_attempts[index].fetch_add(1, Ordering::SeqCst);
+                    let after_safe_rejection = *state.after_safe_rejection.read().unwrap();
+                    let response = if let Some(mode) = after_safe_rejection {
+                        assert!(matches!(
+                            operation,
+                            rockbee_raft_protocol::KvRequest::Put { .. }
+                        ));
+                        KvResponse::Mutation(match request.target_node.get() {
+                            1 => MutationOutcome::Rejected(rockbee_raft_protocol::Failure {
+                                reason: rockbee_raft_protocol::FailureReason::Unavailable,
+                                message: "A safely refused before submission".to_owned(),
+                            }),
+                            2 if matches!(mode, AfterSafeRejection::Unknown) => {
+                                MutationOutcome::Unknown(rockbee_raft_protocol::Failure {
+                                    reason: rockbee_raft_protocol::FailureReason::Unavailable,
+                                    message: "B result is uncertain".to_owned(),
+                                })
+                            }
+                            // C/D would expose a replay by returning Committed.
+                            _ => MutationOutcome::Committed,
+                        })
+                    } else if state.missing_read.load(Ordering::SeqCst)
                         && matches!(operation, rockbee_raft_protocol::KvRequest::Get { .. })
                     {
                         KvResponse::Value(None)
@@ -605,6 +635,8 @@ impl RefreshFixture {
             uncertain_mutation: std::sync::atomic::AtomicBool::new(false),
             d_unavailable: std::sync::atomic::AtomicBool::new(false),
             missing_read: std::sync::atomic::AtomicBool::new(false),
+            after_safe_rejection: std::sync::RwLock::new(None),
+            kv_attempts: std::array::from_fn(|_| AtomicUsize::new(0)),
         });
         let mut servers = Vec::new();
         for listener in listeners {
@@ -666,6 +698,54 @@ impl RefreshFixture {
             server.close().await;
         }
     }
+}
+
+async fn mutation_after_safe_rejection(
+    mode: AfterSafeRejection,
+) -> (MutationOutcome, [usize; 4], usize) {
+    let mut fixture = RefreshFixture::start().await;
+    *fixture.state.after_safe_rejection.write().unwrap() = Some(mode);
+    let directories_before = fixture.state.directories.load(Ordering::SeqCst);
+    let outcome = fixture
+        .client
+        .put(
+            Bytes::from_static(b"safe-prefix"),
+            Bytes::from_static(b"one attempt"),
+        )
+        .unwrap()
+        .await;
+    fixture.close().await;
+    let attempts =
+        std::array::from_fn(|index| fixture.state.kv_attempts[index].load(Ordering::SeqCst));
+    let refreshes = fixture.state.directories.load(Ordering::SeqCst) - directories_before;
+    eprintln!(
+        "safe_rejection_prefix outcome={outcome:?} kv_attempts={attempts:?} refreshes={refreshes} cleanup=joined"
+    );
+    (outcome, attempts, refreshes)
+}
+
+#[tokio::test]
+async fn gateway_safe_rejection_then_unknown_is_terminal_without_replay() {
+    let (outcome, attempts, refreshes) =
+        mutation_after_safe_rejection(AfterSafeRejection::Unknown).await;
+    assert_eq!(
+        outcome,
+        MutationOutcome::Unknown(rockbee_raft_protocol::Failure {
+            reason: rockbee_raft_protocol::FailureReason::Unavailable,
+            message: "B result is uncertain".to_owned(),
+        })
+    );
+    assert_eq!(attempts, [1, 1, 0, 0]);
+    assert_eq!(refreshes, 0);
+}
+
+#[tokio::test]
+async fn gateway_safe_rejection_then_committed_uses_the_next_candidate() {
+    let (outcome, attempts, refreshes) =
+        mutation_after_safe_rejection(AfterSafeRejection::Committed).await;
+    assert_eq!(outcome, MutationOutcome::Committed);
+    assert_eq!(attempts, [1, 1, 0, 0]);
+    assert_eq!(refreshes, 0);
 }
 
 #[tokio::test]
