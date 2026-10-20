@@ -13,6 +13,7 @@ mod capture;
 // The full model's other outcomes are exercised by the gateway history suite.
 #[allow(dead_code)]
 mod history;
+mod multiflight;
 mod proxy;
 mod resources;
 mod scenario;
