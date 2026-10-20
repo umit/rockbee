@@ -15,6 +15,11 @@
 //! Logical byte budgets cannot bound large backing allocations retained by
 //! caller-supplied `Bytes` slices. Values returned to the caller become caller
 //! ownership and no longer count against the Link receive budget.
+//!
+//! `stats()` reports fixed PUT/GET/DELETE lifecycle counters. `stats_handle()`
+//! shares those counters without retaining the connection, so applications can
+//! inspect final outcomes after the last client is dropped. Statistics describe
+//! transport observations; an `unknown` mutation may still commit on the server.
 
 pub mod api;
 pub mod config;
@@ -25,5 +30,7 @@ pub use config::ClientConfig;
 pub use error::{ClientConnectError, ReadError};
 pub use rockbee_raft_protocol::{
     MutationOutcome,
-    transport::{AdmitError, LinkConfig},
+    transport::{
+        AdmitError, ClientStatsHandle, ClientStatsSnapshot, LinkConfig, MutationStats, ReadStats,
+    },
 };

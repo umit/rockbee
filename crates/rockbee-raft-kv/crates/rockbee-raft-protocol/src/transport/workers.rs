@@ -263,8 +263,12 @@ fn deliver_response<Req: WireRequest<Resp>, Resp>(
     state
         .deadlines
         .remove(&(entry.deadline, response.request_id));
+    let result = Ok(response.response);
+    if let Some(stats) = entry.stats {
+        stats.finish(&result);
+    }
     let _ = entry.sender.send(Completion {
-        result: Ok(response.response),
+        result,
         _count: entry.count,
         _receive: Some(permit),
     });

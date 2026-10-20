@@ -1,5 +1,7 @@
 use super::MutationHandle;
-use crate::{AdmitError, ClientConfig, ClientConnectError, ReadError};
+use crate::{
+    AdmitError, ClientConfig, ClientConnectError, ClientStatsHandle, ClientStatsSnapshot, ReadError,
+};
 use bytes::Bytes;
 use rockbee_raft_protocol::{
     KvRequest, KvResponse,
@@ -13,6 +15,7 @@ use tokio::time::Instant;
 pub struct RockBeeRaftClient {
     link: Link<KvRequest, KvResponse>,
     request_timeout: Duration,
+    stats: ClientStatsHandle,
 }
 
 impl RockBeeRaftClient {
@@ -44,7 +47,33 @@ impl RockBeeRaftClient {
         Ok(Self {
             link,
             request_timeout: config.request_timeout,
+            stats: ClientStatsHandle::default(),
         })
+    }
+
+    /// Reads this connection's PUT, GET and DELETE lifecycle counters.
+    ///
+    /// Client clones share counters. Separately connected clients have separate
+    /// counters. PUT/DELETE attempts start at the call; GET attempts start when
+    /// its future is first polled. Dropping an admitted operation's observer does
+    /// not suppress its eventual transport outcome.
+    ///
+    /// `pending` counts requests without a terminal transport decision. A
+    /// completed but unpolled result may still hold admission capacity with
+    /// `pending == 0`. `unknown` preserves uncertainty about a write's effect.
+    /// Fields are sampled independently; accounting identities apply after work
+    /// has quiesced and while `overflowed` is false. Cumulative counters saturate
+    /// and set `overflowed` instead of wrapping.
+    pub fn stats(&self) -> ClientStatsSnapshot {
+        self.stats.snapshot()
+    }
+
+    /// Returns a shared statistics handle that can outlive every client clone.
+    ///
+    /// The handle retains counters only. It does not keep the connection,
+    /// workers, request values or result payloads alive.
+    pub fn stats_handle(&self) -> ClientStatsHandle {
+        self.stats.clone()
     }
 
     /// Admits a PUT now. Polling or dropping its handle does not start/cancel it.
@@ -65,14 +94,16 @@ impl RockBeeRaftClient {
     }
 
     fn submit_mutation(&self, request: KvRequest) -> Result<MutationHandle, AdmitError> {
-        let (operation, key_len, value_len) = match &request {
-            KvRequest::Put { key, value } => ("put", key.len(), Some(value.len())),
-            KvRequest::Delete { key } => ("delete", key.len(), None),
+        let (operation, key_len, value_len, stats) = match &request {
+            KvRequest::Put { key, value } => {
+                ("put", key.len(), Some(value.len()), self.stats.for_put())
+            }
+            KvRequest::Delete { key } => ("delete", key.len(), None, self.stats.for_delete()),
             KvRequest::Get { .. } => unreachable!("only mutations are submitted here"),
         };
         match self
             .link
-            .try_submit(request, Instant::now() + self.request_timeout)
+            .try_submit_with_stats(request, Instant::now() + self.request_timeout, stats)
         {
             Ok(pending) => Ok(MutationHandle { pending }),
             Err(error) => {
@@ -87,9 +118,10 @@ impl RockBeeRaftClient {
     pub async fn get(&self, key: Bytes) -> Result<Option<Bytes>, ReadError> {
         let key_len = key.len();
         log::trace!("raft client operation admitted attempt operation=get key_bytes={key_len}");
-        let pending = match self.link.try_submit(
+        let pending = match self.link.try_submit_with_stats(
             KvRequest::Get { key },
             Instant::now() + self.request_timeout,
+            self.stats.for_get(),
         ) {
             Ok(pending) => pending,
             Err(error) => {

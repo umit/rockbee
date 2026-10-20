@@ -774,3 +774,5 @@ async fn directory_decode_headroom_is_reserved_until_result_is_consumed() {
     );
     link.close().await;
 }
+
+mod stats;

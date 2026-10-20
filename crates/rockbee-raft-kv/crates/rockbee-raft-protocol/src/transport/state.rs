@@ -8,7 +8,7 @@ use tokio::{
 };
 
 use super::{
-    Delivery, LinkConfig, TransportFailure, TransportFailureKind,
+    Delivery, LinkConfig, SubmissionStats, TransportFailure, TransportFailureKind,
     pending::{Admission, Completion},
 };
 use crate::RequestId;
@@ -25,6 +25,7 @@ pub(super) struct Entry<Resp, Expected> {
     pub phase: Phase,
     pub sender: oneshot::Sender<Completion<Resp>>,
     pub count: Arc<Admission>,
+    pub stats: Option<SubmissionStats<Resp>>,
 }
 
 pub(super) struct State<Resp, Expected> {
@@ -141,8 +142,12 @@ fn fail<Resp, Expected>(entry: Entry<Resp, Expected>, reason: TransportFailureKi
         Phase::Queued => Delivery::NotSent,
         Phase::Handed => Delivery::MayHaveBeenSent,
     };
+    let result = Err(TransportFailure { delivery, reason });
+    if let Some(stats) = entry.stats {
+        stats.finish(&result);
+    }
     let _ = entry.sender.send(Completion {
-        result: Err(TransportFailure { delivery, reason }),
+        result,
         _count: entry.count,
         _receive: None,
     });

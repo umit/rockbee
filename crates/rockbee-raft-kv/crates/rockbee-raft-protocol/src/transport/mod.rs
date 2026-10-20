@@ -15,6 +15,7 @@ mod config;
 mod pending;
 pub mod server;
 mod state;
+mod stats;
 mod workers;
 
 use std::{marker::PhantomData, net::SocketAddr, sync::Arc};
@@ -36,6 +37,9 @@ pub use config::{
 };
 pub use pending::PendingResponse;
 use state::{Entry, Phase, Shared};
+pub use stats::{
+    ClientStatsHandle, ClientStatsSnapshot, MutationStats, ReadStats, SubmissionStats,
+};
 
 /// A single immutable connection generation. Clone shares its admission limits.
 pub struct Link<Req, Resp>
@@ -153,6 +157,15 @@ where
         request: Req,
         deadline: Instant,
     ) -> Result<PendingResponse<Resp>, AdmitError> {
+        self.try_submit_inner(request, deadline, &mut None)
+    }
+
+    fn try_submit_inner(
+        &self,
+        request: Req,
+        deadline: Instant,
+        stats: &mut Option<SubmissionStats<Resp>>,
+    ) -> Result<PendingResponse<Resp>, AdmitError> {
         if let Err(error) = request.validate() {
             log::debug!("raft transport rejected invalid request before admission");
             return Err(AdmitError::InvalidRequest(error));
@@ -194,6 +207,9 @@ where
                 if self.inner.queue.try_send(item).is_err() {
                     Err(AdmitError::Closed)
                 } else {
+                    if let Some(stats) = stats.as_ref() {
+                        stats.admitted();
+                    }
                     state.entries.insert(
                         id,
                         Entry {
@@ -202,6 +218,7 @@ where
                             phase: Phase::Queued,
                             sender,
                             count: admission.lifetime,
+                            stats: stats.take(),
                         },
                     );
                     state.deadlines.insert((deadline, id));
@@ -225,6 +242,28 @@ where
             id.get()
         );
         Ok(PendingResponse::new(receiver))
+    }
+
+    /// Submits eagerly with the built-in KV counters selected by `stats`.
+    ///
+    /// # Errors
+    /// Returns the same local, unsent admission errors as [`Self::try_submit`].
+    pub fn try_submit_with_stats(
+        &self,
+        request: Req,
+        deadline: Instant,
+        stats: SubmissionStats<Resp>,
+    ) -> Result<PendingResponse<Resp>, AdmitError> {
+        stats.attempted();
+        let mut stats = Some(stats);
+        let result = self.try_submit_inner(request, deadline, &mut stats);
+        if result.is_err() {
+            stats
+                .as_ref()
+                .expect("failed admission retains its stats token")
+                .admission_failed();
+        }
+        result
     }
 
     /// Retires this generation and joins every owned worker. Idempotent.
