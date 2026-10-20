@@ -6,6 +6,8 @@
 mod movement_recovery;
 #[path = "support/soak.rs"]
 mod soak;
+#[path = "support/storage_lock.rs"]
+mod storage_lock;
 
 use std::{
     fs::OpenOptions,
