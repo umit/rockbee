@@ -5,6 +5,7 @@ use rockbee_raft_protocol::{
     KvRequest, KvResponse, MAX_FRAME_PAYLOAD, MutationOutcome, RequestEnvelope, RequestId,
     ResponseEnvelope, decode_frame,
 };
+use serde::{Deserialize, Serialize};
 use std::{io, net::SocketAddr, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -13,7 +14,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(super) struct MatchedPut {
     pub(super) request_id: RequestId,
     pub(super) key: Vec<u8>,
@@ -21,7 +22,7 @@ pub(super) struct MatchedPut {
     pub(super) committed_at: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub(super) struct ProxyReceipt {
     pub(super) accepted_connections: usize,
     pub(super) forwarded_put_frames: usize,
@@ -29,6 +30,10 @@ pub(super) struct ProxyReceipt {
     pub(super) extra_original_frames: usize,
     pub(super) original_eof_observed: bool,
     pub(super) committed_at: Option<u64>,
+    /// Both complete pair requests were received before either was forwarded.
+    pub(super) both_received_at: Option<u64>,
+    /// Immediately before attempting the first unchanged frame write upstream.
+    pub(super) forward_started_at: Option<u64>,
     /// The two-flight relay has exactly two bounded correlation slots.
     pub(super) matched_puts: [Option<MatchedPut>; 2],
 }
@@ -36,7 +41,13 @@ pub(super) struct ProxyReceipt {
 #[derive(Clone, Copy)]
 enum Mode {
     One,
-    Two,
+    Two(PairTargets),
+}
+
+#[derive(Clone, Copy)]
+enum PairTargets {
+    DistinctKeys,
+    SameKey,
 }
 
 pub(super) struct ReplyLossProxy {
@@ -54,7 +65,14 @@ impl ReplyLossProxy {
         gateway: SocketAddr,
         events: Arc<Events>,
     ) -> Result<Self, io::Error> {
-        Self::start_with_mode(gateway, events, Mode::Two).await
+        Self::start_with_mode(gateway, events, Mode::Two(PairTargets::DistinctKeys)).await
+    }
+
+    pub(super) async fn start_same_key(
+        gateway: SocketAddr,
+        events: Arc<Events>,
+    ) -> Result<Self, io::Error> {
+        Self::start_with_mode(gateway, events, Mode::Two(PairTargets::SameKey)).await
     }
 
     async fn start_with_mode(
@@ -68,7 +86,7 @@ impl ReplyLossProxy {
         let task = tokio::spawn(async move {
             match mode {
                 Mode::One => run_one(listener, gateway, events, stopped).await,
-                Mode::Two => run_two(listener, gateway, events, stopped).await,
+                Mode::Two(targets) => run_two(listener, gateway, events, stopped, targets).await,
             }
         });
         Ok(Self {
@@ -168,6 +186,7 @@ async fn run_two(
     gateway: SocketAddr,
     events: Arc<Events>,
     mut stopped: watch::Receiver<bool>,
+    targets: PairTargets,
 ) -> Result<ProxyReceipt, String> {
     let mut receipt = ProxyReceipt::default();
     loop {
@@ -189,11 +208,13 @@ async fn run_two(
             return Ok(receipt);
         };
         let second = decode_put(&second_frame, "second")?;
-        validate_distinct_puts(&first, &second)?;
+        validate_pair_puts(&first, &second, targets)?;
+        receipt.both_received_at = Some(events.next());
         let Some(mut backend) = interruptible(&mut stopped, TcpStream::connect(gateway)).await?
         else {
             return Ok(receipt);
         };
+        receipt.forward_started_at = Some(events.next());
         for frame in [&first_frame, &second_frame] {
             let Some(()) = interruptible(&mut stopped, backend.write_all(frame)).await? else {
                 return Ok(receipt);
@@ -296,14 +317,27 @@ fn decode_put(frame: &[u8], position: &str) -> Result<RequestEnvelope, String> {
     Ok(request)
 }
 
-fn validate_distinct_puts(first: &RequestEnvelope, second: &RequestEnvelope) -> Result<(), String> {
+fn validate_pair_puts(
+    first: &RequestEnvelope,
+    second: &RequestEnvelope,
+    targets: PairTargets,
+) -> Result<(), String> {
     if first.request_id == second.request_id {
         return Err("two-flight reply-loss proxy requires distinct nonzero request ids".into());
     }
     let (first_key, first_value) = put_parts(first)?;
     let (second_key, second_value) = put_parts(second)?;
-    if first_key == second_key || first_value == second_value {
-        return Err("two-flight reply-loss proxy requires distinct key and value targets".into());
+    if first_value == second_value {
+        return Err("two-flight reply-loss proxy requires distinct values".into());
+    }
+    match targets {
+        PairTargets::DistinctKeys if first_key == second_key => {
+            return Err("distinct-key reply-loss mode requires different keys".into());
+        }
+        PairTargets::SameKey if first_key != second_key => {
+            return Err("same-key reply-loss mode requires identical keys".into());
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -353,4 +387,77 @@ async fn read_next_frame_or_eof(
     frame[..header.len()].copy_from_slice(&header);
     reader.read_exact(&mut frame[header.len()..]).await?;
     Ok(Some(frame))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    fn put(id: u64, key: &'static [u8], value: &'static [u8]) -> RequestEnvelope {
+        RequestEnvelope::new(
+            RequestId::new(id).unwrap(),
+            1000,
+            KvRequest::Put {
+                key: Bytes::from_static(key),
+                value: Bytes::from_static(value),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn old_pair_mode_requires_distinct_keys_and_values() {
+        let first = put(1, b"first", b"v1");
+        assert!(
+            validate_pair_puts(&first, &put(2, b"second", b"v2"), PairTargets::DistinctKeys)
+                .is_ok()
+        );
+        assert!(
+            validate_pair_puts(&first, &put(2, b"first", b"v2"), PairTargets::DistinctKeys)
+                .is_err()
+        );
+        assert!(
+            validate_pair_puts(&first, &put(2, b"second", b"v1"), PairTargets::DistinctKeys)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn same_key_pair_requires_equal_keys_and_distinct_values() {
+        let first = put(1, b"same", b"v1");
+        assert!(validate_pair_puts(&first, &put(2, b"same", b"v2"), PairTargets::SameKey).is_ok());
+        assert!(
+            validate_pair_puts(&first, &put(2, b"other", b"v2"), PairTargets::SameKey).is_err()
+        );
+        assert!(validate_pair_puts(&first, &put(2, b"same", b"v1"), PairTargets::SameKey).is_err());
+    }
+
+    #[test]
+    fn both_pair_modes_reject_duplicate_request_ids() {
+        let first = put(1, b"first", b"v1");
+        for (mode, key) in [
+            (PairTargets::DistinctKeys, b"other".as_slice()),
+            (PairTargets::SameKey, b"first".as_slice()),
+        ] {
+            assert!(validate_pair_puts(&first, &put(1, key, b"v2"), mode).is_err());
+        }
+    }
+
+    #[test]
+    fn both_pair_modes_reject_non_put_requests() {
+        let first = put(1, b"same", b"v1");
+        let get = RequestEnvelope::new(
+            RequestId::new(2).unwrap(),
+            1000,
+            KvRequest::Get {
+                key: Bytes::from_static(b"same"),
+            },
+        )
+        .unwrap();
+        for mode in [PairTargets::DistinctKeys, PairTargets::SameKey] {
+            assert!(validate_pair_puts(&first, &get, mode).is_err());
+            assert!(validate_pair_puts(&get, &first, mode).is_err());
+        }
+    }
 }

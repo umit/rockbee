@@ -54,20 +54,16 @@ pub(super) fn check_persisted_backend_history(
     check(&backend_history(capture), 100_000).expect("captured backend history input must validate")
 }
 
-fn persist_reload<T>(path: &Path, capture: &T) -> T
+pub(super) fn persist_reload<T>(path: &Path, capture: &T) -> T
 where
     T: Serialize + DeserializeOwned,
 {
-    let bytes = postcard::to_stdvec(capture).expect("capture must serialize");
-    assert!(
-        bytes.len() <= MAX_CAPTURE_BYTES,
-        "captured history must stay bounded"
-    );
+    let mut buffer = vec![0; MAX_CAPTURE_BYTES];
+    let bytes =
+        postcard::to_slice(capture, &mut buffer).expect("capture encoding must stay bounded");
     let temporary = path.with_extension("partial");
     let mut output = std::fs::File::create(&temporary).expect("create bounded capture file");
-    output
-        .write_all(&bytes)
-        .expect("write bounded capture file");
+    output.write_all(bytes).expect("write bounded capture file");
     output.sync_all().expect("sync bounded capture file");
     std::fs::rename(temporary, path).expect("publish bounded capture file");
     let input = std::fs::File::open(path).expect("open persisted capture file");

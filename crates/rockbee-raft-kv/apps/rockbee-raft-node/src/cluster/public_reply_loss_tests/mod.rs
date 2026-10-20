@@ -12,6 +12,8 @@ mod capture;
 mod multiflight;
 mod proxy;
 mod resources;
+mod same_key;
+mod same_key_capture;
 mod scenario;
 
 use super::history_model as history;
