@@ -9,15 +9,12 @@
 mod backend;
 mod backend_proxy;
 mod capture;
-#[path = "../../../../rockbee-raft-gateway/tests/support/history.rs"]
-// The full model's other outcomes are exercised by the gateway history suite.
-#[allow(dead_code)]
-mod history;
 mod multiflight;
 mod proxy;
 mod resources;
 mod scenario;
 
+use super::history_model as history;
 use capture::{CapturedHistory, check_persisted_history};
 use history::{KeyWitness, Verdict};
 use resources::Resources;

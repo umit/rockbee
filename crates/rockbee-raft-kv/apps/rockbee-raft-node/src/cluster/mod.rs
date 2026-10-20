@@ -3,6 +3,11 @@ mod admission;
 mod bootstrap;
 #[cfg(all(test, feature = "diagnostics"))]
 mod group_isolation_tests;
+#[cfg(test)]
+#[path = "../../../rockbee-raft-gateway/tests/support/history.rs"]
+// Shared by node fixtures; the gateway suite exercises the full model.
+#[allow(dead_code)]
+mod history_model;
 mod join;
 mod movement;
 #[cfg(test)]

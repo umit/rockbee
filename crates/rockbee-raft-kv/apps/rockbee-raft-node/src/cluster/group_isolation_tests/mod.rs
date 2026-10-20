@@ -5,10 +5,11 @@
 
 #![allow(clippy::unwrap_used, clippy::panic)]
 
+mod capture;
 mod fatal;
 mod resources;
 
-use super::{NodeRuntime, service::authority_barrier};
+use super::{NodeRuntime, history_model as history, service::authority_barrier};
 use crate::rpc::test_support::PeerRelays;
 use bytes::Bytes;
 use resources::Resources;

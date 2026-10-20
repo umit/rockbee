@@ -1,19 +1,91 @@
 //! An injected append persistence error drives actual OpenRaft Fatal handling.
 
 use super::{
-    HEALTHY, OBSERVATION_LIMIT, Resources, STALLED, authority, healthy_crud, key, message, wait_for,
+    HEALTHY, OBSERVATION_LIMIT, Resources, STALLED, authority,
+    capture::{
+        AuthorityObservation, Capture, FaultObservation, NativeCounts, Operation, Outcome, Topology,
+    },
+    key, message, wait_for,
 };
 use bytes::Bytes;
+use rockbee_raft_client::RockBeeRaftClient;
 use rockbee_raft_protocol::{FailureReason, GroupId, MutationOutcome};
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{
     sync::Mutex,
     time::{Instant, sleep},
 };
 
 const CLOSED_GATE_MESSAGE: &str = "group native mutation admission is closed";
+type SharedCapture = Arc<std::sync::Mutex<Capture>>;
 
-async fn elect_b(resources: &Resources) -> Result<(), String> {
+async fn captured_put(
+    capture: &SharedCapture,
+    client: &RockBeeRaftClient,
+    key: Bytes,
+    value: Bytes,
+) -> Result<MutationOutcome, String> {
+    let id = capture
+        .lock()
+        .unwrap()
+        .begin(key.clone(), Operation::Put(value.clone()))?;
+    // PUT is eager: record invocation before the synchronous admission call.
+    let pending = match client.put(key, value) {
+        Ok(pending) => pending,
+        Err(error) => {
+            let message = error.to_string();
+            capture
+                .lock()
+                .unwrap()
+                .notice(id, Outcome::AdmissionError(message.clone()))?;
+            return Err(message);
+        }
+    };
+    let outcome = pending.await;
+    let recorded = match &outcome {
+        MutationOutcome::Committed => Outcome::Committed,
+        MutationOutcome::Rejected(failure) => Outcome::Rejected(failure.clone()),
+        MutationOutcome::Unknown(failure) => Outcome::Unknown(failure.clone()),
+        MutationOutcome::NotSent(failure) => Outcome::NotSent(failure.clone()),
+    };
+    capture.lock().unwrap().notice(id, recorded)?;
+    Ok(outcome)
+}
+
+async fn captured_get(
+    capture: &SharedCapture,
+    client: &RockBeeRaftClient,
+    key: Bytes,
+) -> Result<Option<Bytes>, String> {
+    // This async body records nothing until actually polled, like Client::get.
+    let id = capture.lock().unwrap().begin(key.clone(), Operation::Get)?;
+    let result = client.get(key).await.map_err(message);
+    let outcome = match &result {
+        Ok(value) => Outcome::Value(value.clone()),
+        Err(error) => Outcome::ReadError(error.clone()),
+    };
+    capture.lock().unwrap().notice(id, outcome)?;
+    result
+}
+
+async fn captured_healthy(
+    capture: &SharedCapture,
+    client: &RockBeeRaftClient,
+    key: Bytes,
+) -> Result<(), String> {
+    let value = Bytes::from_static(super::VALUE);
+    let outcome = captured_put(capture, client, key.clone(), value.clone()).await?;
+    if outcome != MutationOutcome::Committed {
+        return Err(format!("healthy PUT: {outcome:?}"));
+    }
+    let read = captured_get(capture, client, key).await?;
+    if read != Some(value) {
+        return Err(format!("healthy GET: {read:?}"));
+    }
+    Ok(())
+}
+
+async fn elect_b(resources: &Resources, capture: &SharedCapture) -> Result<(), String> {
     let node = &resources.nodes[1];
     let group = &node.service.groups[&STALLED];
     // Only B starts elections. C still votes; automatic retries allow A's old
@@ -27,6 +99,16 @@ async fn elect_b(resources: &Resources) -> Result<(), String> {
     let applied = super::authority_barrier(STALLED, group, Instant::now() + Duration::from_secs(5))
         .await
         .map_err(|error| format!("B G1 authority after A Fatal: {error:?}"))?;
+    {
+        let mut capture = capture.lock().unwrap();
+        let observed_at = capture.event();
+        capture.authority = Some(AuthorityObservation {
+            observed_at,
+            node_id: node.service.identity.node_id.get(),
+            group_id: STALLED.get(),
+            applied,
+        });
+    }
     log::info!(
         "raft_fatal_failover_ready group={} leader={} authority_applied={applied:?} directory_revision={} candidates={:?}",
         STALLED.get(),
@@ -37,8 +119,12 @@ async fn elect_b(resources: &Resources) -> Result<(), String> {
     Ok(())
 }
 
-async fn verify_new_mutation_failover(resources: &Resources, client: usize) -> Result<(), String> {
-    elect_b(resources).await?;
+async fn verify_new_mutation_failover(
+    resources: &Resources,
+    client: usize,
+    capture: &SharedCapture,
+) -> Result<(), String> {
+    elect_b(resources, capture).await?;
     let a = &resources.nodes[0];
     if resources
         .directory
@@ -56,11 +142,14 @@ async fn verify_new_mutation_failover(resources: &Resources, client: usize) -> R
     let new_key = key(&resources.directory, STALLED, 2);
     let new_value = Bytes::from_static(b"new-mutation-after-local-fatal");
     log::info!("raft_fatal_failover_before proposals={before:?}");
-    let outcome = resources.clients[client]
-        .put(new_key.clone(), new_value.clone())
-        .map_err(message)?
-        .await;
-    let read = resources.clients[client].get(new_key).await;
+    let outcome = captured_put(
+        capture,
+        &resources.clients[client],
+        new_key.clone(),
+        new_value.clone(),
+    )
+    .await?;
+    let read = captured_get(capture, &resources.clients[client], new_key).await;
     let after = [0, 1, 2].map(|index| resources.nodes[index].service.test_proposals(STALLED));
     // Preserve the actual failing outcome and counters before returning through
     // the existing outer owner, which closes every resource before asserting.
@@ -70,7 +159,8 @@ async fn verify_new_mutation_failover(resources: &Resources, client: usize) -> R
     );
     authority(a, GroupId::new(0)).await?;
     authority(a, HEALTHY).await?;
-    healthy_crud(
+    captured_healthy(
+        capture,
         &resources.clients[client],
         key(&resources.directory, HEALTHY, 3),
     )
@@ -101,10 +191,10 @@ async fn verify_new_mutation_failover(resources: &Resources, client: usize) -> R
     Ok(())
 }
 
-async fn observe(resources: &mut Resources) -> Result<(), String> {
+async fn observe(resources: &mut Resources, capture: &SharedCapture) -> Result<(), String> {
     let original = resources.client().await?;
     let healthy_key = key(&resources.directory, HEALTHY, 1);
-    healthy_crud(&resources.clients[original], healthy_key).await?;
+    captured_healthy(capture, &resources.clients[original], healthy_key).await?;
     authority(&resources.nodes[0], STALLED).await?;
 
     let initial_capacity = resources.nodes[0].service.groups[&STALLED]
@@ -119,10 +209,13 @@ async fn observe(resources: &mut Resources) -> Result<(), String> {
     let append_failure = resources.nodes[0].service.groups[&STALLED]
         .reader
         .fail_append_for_test(fatal_key.clone(), fatal_value.clone());
-    let outcome = resources.clients[original]
-        .put(fatal_key, fatal_value)
-        .map_err(message)?
-        .await;
+    let outcome = captured_put(
+        capture,
+        &resources.clients[original],
+        fatal_key,
+        fatal_value,
+    )
+    .await?;
     if !matches!(outcome, MutationOutcome::Unknown(ref failure) if failure.reason == FailureReason::Unavailable)
     {
         return Err(format!(
@@ -150,6 +243,20 @@ async fn observe(resources: &mut Resources) -> Result<(), String> {
         .service
         .test_fatal_admission(STALLED)
         .ok_or_else(|| "Fatal admission snapshot was not recorded".to_owned())?;
+    {
+        let mut capture = capture.lock().unwrap();
+        let observed_at = capture.event();
+        capture.fault = Some(FaultObservation {
+            observed_at,
+            group_id: receipt.group_id.get(),
+            log_id: receipt.log_id,
+            persist_failed: receipt.persist_failed,
+            callback_failed: receipt.callback_failed,
+            gate_closed: fatal.closed,
+            available_at_close: fatal.available,
+            active_at_close: fatal.native_active,
+        });
+    }
     if !fatal.closed
         || fatal.available != initial_capacity - 1
         || fatal.native_active != 1
@@ -175,13 +282,13 @@ async fn observe(resources: &mut Resources) -> Result<(), String> {
         .collect();
     let fresh = resources.client().await?;
     let rejected_key = key(&resources.directory, STALLED, 1);
-    let rejected = resources.clients[fresh]
-        .put(
-            rejected_key.clone(),
-            Bytes::from_static(b"must-not-enter-closed-group"),
-        )
-        .map_err(message)?
-        .await;
+    let rejected = captured_put(
+        capture,
+        &resources.clients[fresh],
+        rejected_key.clone(),
+        Bytes::from_static(b"must-not-enter-closed-group"),
+    )
+    .await?;
     match rejected {
         MutationOutcome::Rejected(failure)
             if failure.reason == FailureReason::Unavailable
@@ -217,7 +324,8 @@ async fn observe(resources: &mut Resources) -> Result<(), String> {
         }
     }
 
-    healthy_crud(
+    captured_healthy(
+        capture,
         &resources.clients[original],
         key(&resources.directory, HEALTHY, 2),
     )
@@ -238,7 +346,57 @@ async fn observe(resources: &mut Resources) -> Result<(), String> {
         finished.dropped_before_completion,
         resources.nodes.len(),
     );
-    verify_new_mutation_failover(resources, original).await
+    verify_new_mutation_failover(resources, original, capture).await
+}
+
+fn persist_capture(
+    capture: &SharedCapture,
+    resources: &Resources,
+    path: &Path,
+    result: &Result<(), String>,
+    interrupted: bool,
+) -> Result<(super::history::Verdict, [usize; 7]), String> {
+    let captured = {
+        // A panicking observer cannot make its previously recorded prefix
+        // inaccessible. This runs only after it is joined and owners close.
+        let mut capture = capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        capture.scenario_failure = result.as_ref().err().map(|error| {
+            let mut end = error.len().min(1024);
+            while !error.is_char_boundary(end) {
+                end -= 1;
+            }
+            error[..end].to_owned()
+        });
+        if resources.nodes.len() == 3 {
+            capture.final_native = Some([0, 1, 2].map(|index| {
+                let counts = resources.nodes[index].service.test_proposals(STALLED);
+                NativeCounts {
+                    entered: counts.entered,
+                    completed: counts.completed,
+                    active: counts.active,
+                    dropped: counts.dropped_before_completion,
+                }
+            }));
+        }
+        capture.seal(interrupted);
+        capture.clone()
+    };
+    captured.persist(path)?;
+    let reloaded = Capture::load(path)?;
+    if reloaded != captured {
+        return Err("persisted capture differs from actual observations".into());
+    }
+    let verdict = reloaded.verdict()?;
+    let counts = reloaded.counts();
+    log::info!(
+        "raft_fatal_history path={} source_revision=unrecorded counts_attempt_put_get_committed_rejected_unknown_value={counts:?} verdict={verdict:?} scenario_failure={:?} final_native={:?}",
+        path.display(),
+        reloaded.scenario_failure,
+        reloaded.final_native,
+    );
+    Ok((verdict, counts))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -264,9 +422,37 @@ async fn local_fatal_closes_only_its_group_admission() {
 
     // Native constructors and their accepted work remain owned outside the
     // disposable observer, so timeout/signal cleanup never aborts them.
+    let report = tempfile::Builder::new()
+        .prefix("rockbee-fatal-history-")
+        .tempdir()
+        .expect("create unique retained capture directory")
+        .keep();
+    let capture_path = report.join("history.bin");
     let (resources, listeners, public) = Resources::prepare()
         .await
         .expect("prepare owned fixture listeners");
+    let initial = [
+        key(&resources.directory, HEALTHY, 1),
+        key(&resources.directory, HEALTHY, 2),
+        key(&resources.directory, HEALTHY, 3),
+        key(&resources.directory, STALLED, 0),
+        key(&resources.directory, STALLED, 1),
+        key(&resources.directory, STALLED, 2),
+    ];
+    let capture = Arc::new(std::sync::Mutex::new(Capture::new(
+        Topology {
+            cluster_id: resources.directory.cluster_id,
+            shards: resources.directory.shard_config,
+            revision: resources.directory.revision,
+            nodes: resources
+                .directory
+                .nodes
+                .clone()
+                .try_into()
+                .expect("exact ABC topology"),
+        },
+        initial,
+    )));
     let owner = Arc::new(Mutex::new(resources));
     let starting_owner = Arc::clone(&owner);
     let mut startup = tokio::spawn(async move {
@@ -289,16 +475,28 @@ async fn local_fatal_closes_only_its_group_admission() {
         }
     };
     if let Err(error) = startup_result {
-        owner.lock().await.close().await;
+        let mut resources = owner.lock().await;
+        resources.close().await;
+        let result = Err(error.clone());
+        let recorded = persist_capture(&capture, &resources, &capture_path, &result, true);
+        log::info!(
+            "raft_fatal_history_startup_failure capture={recorded:?} path={}",
+            capture_path.display()
+        );
         panic!("startup failed after owned cleanup: {error}");
     }
 
     let observing = Arc::clone(&owner);
-    let mut observer = tokio::spawn(async move { observe(&mut *observing.lock().await).await });
-    let result = tokio::select! {
-        result = &mut observer => result.map_err(message).and_then(|result| result),
-        _ = &mut interrupted => Err("observation interrupted".into()),
-        _ = sleep(OBSERVATION_LIMIT) => Err("observation deadline expired".into()),
+    let observed_capture = Arc::clone(&capture);
+    let mut observer =
+        tokio::spawn(async move { observe(&mut *observing.lock().await, &observed_capture).await });
+    let (result, capture_interrupted) = tokio::select! {
+        result = &mut observer => {
+            let interrupted = result.is_err();
+            (result.map_err(message).and_then(|result| result), interrupted)
+        },
+        _ = &mut interrupted => (Err("observation interrupted".into()), true),
+        _ = sleep(OBSERVATION_LIMIT) => (Err("observation deadline expired".into()), true),
     };
     if !observer.is_finished() {
         observer.abort();
@@ -308,5 +506,20 @@ async fn local_fatal_closes_only_its_group_admission() {
         .unwrap_or_else(|_| panic!("observer released resources"))
         .into_inner();
     resources.close().await;
+    let recorded = persist_capture(
+        &capture,
+        &resources,
+        &capture_path,
+        &result,
+        capture_interrupted,
+    );
+    log::info!(
+        "raft_fatal_history_result capture={recorded:?} path={}",
+        capture_path.display()
+    );
     result.expect("fatal group observation after owned cleanup");
+    let (verdict, counts) =
+        recorded.expect("complete capture persisted and reloaded after owned cleanup");
+    assert_eq!(counts, [10, 6, 4, 4, 1, 1, 4]);
+    assert!(matches!(verdict, super::history::Verdict::Legal { .. }));
 }
