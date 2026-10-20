@@ -4,10 +4,10 @@
 use std::sync::Mutex;
 
 use bytes::Bytes;
-use openraft::EntryPayload;
+use openraft::{EntryPayload, ErrorSubject, ErrorVerb};
 use rockbee_raft_protocol::GroupId;
 
-use super::{Group, TestWriteAction};
+use super::{Group, TestWriteAction, error};
 use crate::types::{Command, Entry, LogId, StoreError};
 
 #[derive(Clone, Debug)]
@@ -15,13 +15,22 @@ pub(crate) struct AppendFailureReceipt {
     pub(crate) group_id: GroupId,
     pub(crate) log_id: LogId,
     pub(crate) persist_failed: bool,
+    pub(crate) native_persist_succeeded: bool,
+    pub(crate) injected_ack_error: bool,
     pub(crate) callback_failed: bool,
+}
+
+#[derive(Clone, Copy)]
+enum FailurePhase {
+    BeforePersist,
+    AfterPersist,
 }
 
 pub(crate) struct AppendFailure {
     group_id: GroupId,
     key: Bytes,
     value: Bytes,
+    phase: FailurePhase,
     receipt: Mutex<Option<AppendFailureReceipt>>,
 }
 
@@ -31,7 +40,15 @@ impl AppendFailure {
             group_id,
             key,
             value,
+            phase: FailurePhase::BeforePersist,
             receipt: Mutex::new(None),
+        }
+    }
+
+    pub(super) fn after_persist(group_id: GroupId, key: Bytes, value: Bytes) -> Self {
+        Self {
+            phase: FailurePhase::AfterPersist,
+            ..Self::new(group_id, key, value)
         }
     }
 
@@ -59,13 +76,15 @@ impl AppendFailure {
             group_id: self.group_id,
             log_id,
             persist_failed: false,
+            native_persist_succeeded: false,
+            injected_ack_error: false,
             callback_failed: false,
         });
         true
     }
 
     // Called immediately before persist, with the existing group write gate
-    // held. No other persistence operation can consume this queued action.
+    // held. Only the pre-write phase queues an action for this exact persist.
     pub(super) fn arm(&self, group: &Group, log_id: LogId) -> bool {
         assert_eq!(self.group_id, GroupId::new(group.id));
         let mut actions = group.test_writes.lock().unwrap();
@@ -76,29 +95,44 @@ impl AppendFailure {
         if !self.claim(log_id) {
             return false;
         }
-        actions.push_back(TestWriteAction::Fail);
+        if matches!(self.phase, FailurePhase::BeforePersist) {
+            actions.push_back(TestWriteAction::Fail);
+        }
         true
     }
 
-    pub(super) fn record_persist_result(&self, result: &Result<(), StoreError>) {
-        let err = result
-            .as_ref()
-            .expect_err("armed append must fail persistence");
-        assert!(err.to_string().contains("injected durable write failure"));
-        self.receipt
-            .lock()
-            .unwrap()
-            .as_mut()
-            .unwrap()
-            .persist_failed = true;
-    }
-
-    // Called only after the actual final callback receives this persist Err.
-    pub(super) fn record_failed_callback(&self) {
+    pub(super) fn finish_persist(&self, result: Result<(), StoreError>) -> Result<(), StoreError> {
         let mut receipt = self.receipt.lock().unwrap();
         let receipt = receipt.as_mut().unwrap();
-        assert!(receipt.persist_failed);
-        receipt.callback_failed = true;
+        receipt.native_persist_succeeded = result.is_ok();
+        receipt.persist_failed = result.is_err();
+        match self.phase {
+            FailurePhase::BeforePersist => {
+                let err = result
+                    .as_ref()
+                    .expect_err("armed append must fail persistence");
+                assert!(err.to_string().contains("injected durable write failure"));
+            }
+            FailurePhase::AfterPersist if result.is_ok() => {
+                receipt.injected_ack_error = true;
+                return Err(error(
+                    ErrorSubject::Logs,
+                    ErrorVerb::Write,
+                    "injected post-write acknowledgment failure",
+                ));
+            }
+            // Preserve a real native failure rather than relabeling it as an
+            // injected acknowledgment error after a successful write.
+            FailurePhase::AfterPersist => {}
+        }
+        result
+    }
+
+    // Called only after the actual final callback receives this exact result.
+    pub(super) fn record_callback_result(&self, result: &Result<(), StoreError>) {
+        let mut receipt = self.receipt.lock().unwrap();
+        let receipt = receipt.as_mut().unwrap();
+        receipt.callback_failed = result.is_err();
     }
 }
 
@@ -121,6 +155,32 @@ mod tests {
             }),
             index,
         )
+    }
+
+    #[test]
+    fn post_write_hook_preserves_original_native_error() {
+        let failure = AppendFailure::after_persist(
+            GroupId::new(1),
+            Bytes::from_static(b"target"),
+            Bytes::from_static(b"value"),
+        );
+        let target = put(b"target", b"value", 11);
+        assert!(failure.claim(target.log_id));
+        let original = error(
+            ErrorSubject::Logs,
+            ErrorVerb::Write,
+            "native result sentinel",
+        );
+        let expected = format!("{original:?}");
+        let returned = failure.finish_persist(Err(original)).unwrap_err();
+        assert_eq!(format!("{returned:?}"), expected);
+        let receipt = failure.receipt().unwrap();
+        assert_eq!(receipt.group_id, GroupId::new(1));
+        assert_eq!(receipt.log_id, target.log_id);
+        assert!(receipt.persist_failed);
+        assert!(!receipt.native_persist_succeeded);
+        assert!(!receipt.injected_ack_error);
+        assert!(!receipt.callback_failed);
     }
 
     #[test]

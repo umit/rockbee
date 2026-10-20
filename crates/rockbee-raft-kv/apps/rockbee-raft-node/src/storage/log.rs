@@ -199,7 +199,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
                         callback.complete(&result);
                         #[cfg(all(test, feature = "diagnostics"))]
                         if let Some(failure) = failure {
-                            failure.record_failed_callback();
+                            failure.record_callback_result(&result);
                         }
                     }
                     result
@@ -409,9 +409,10 @@ fn append_chunk(
     }
     let result = group.persist(batch, ErrorSubject::Logs);
     #[cfg(all(test, feature = "diagnostics"))]
-    if let Some(failure) = claimed_failure {
-        failure.record_persist_result(&result);
-    }
+    let result = match claimed_failure {
+        Some(failure) => failure.finish_persist(result),
+        None => result,
+    };
     result
 }
 
