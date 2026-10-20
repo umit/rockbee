@@ -16,6 +16,7 @@ use rockbee_raft_protocol::{
 };
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
+mod activation;
 mod successor;
 
 fn identity() -> StorageIdentity {

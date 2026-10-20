@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use rockbee_raft_protocol::{
     GroupId, NodeId,
+    backend::AppliedMembership,
     control::{CommittedLogPosition, MoveIntent, MoveJobId, MoveProgress, MoveRecord},
     routing::{ClusterDirectory, NodeEndpoint},
 };
@@ -45,6 +46,14 @@ pub enum MetadataCommand {
         predecessor_job_id: MoveJobId,
         intent: MoveIntent,
     },
+    /// Internal conditional transition; callers cannot supply it through public KV.
+    ActivateSuccessor {
+        expected_directory_revision: u64,
+        data_group: GroupId,
+        predecessor_job_id: MoveJobId,
+        successor_job_id: MoveJobId,
+        proof: Box<HandoffProof>,
+    },
 }
 
 impl MetadataCommand {
@@ -65,6 +74,34 @@ impl MetadataCommand {
             }
             Self::BeginMove { intent } | Self::PrepareSuccessor { intent, .. } => {
                 intent.validate()?
+            }
+            Self::ActivateSuccessor {
+                expected_directory_revision,
+                data_group,
+                predecessor_job_id,
+                successor_job_id,
+                proof,
+            } => {
+                proof.observed.validate()?;
+                if *expected_directory_revision == 0
+                    || data_group.is_metadata()
+                    || data_group.get() > 256
+                    || predecessor_job_id == successor_job_id
+                    || proof.fence.data_group != *data_group
+                    || proof.fence.predecessor_job_id != *predecessor_job_id
+                    || proof.fence.successor_job_id != *successor_job_id
+                    || proof.fence.predecessor_revision == 0
+                    || proof.observed.data_group != *data_group
+                    || proof.seals.iter().any(|seal| {
+                        seal.data_group != *data_group
+                            || seal.predecessor_job_id != *predecessor_job_id
+                            || seal.predecessor_revision != proof.fence.predecessor_revision
+                    })
+                {
+                    return Err(ProtocolError::InvalidRouting(
+                        "invalid successor activation shape",
+                    ));
+                }
             }
             Self::CompleteMove {
                 expected_directory_revision,
@@ -147,6 +184,14 @@ pub enum MetadataResult {
         data_group: GroupId,
         job_id: MoveJobId,
     },
+    Activated {
+        data_group: GroupId,
+        job_id: MoveJobId,
+    },
+    AlreadyActivated {
+        data_group: GroupId,
+        job_id: MoveJobId,
+    },
 }
 
 /// Conditional rejection is normal; it does not change durable state.
@@ -195,11 +240,63 @@ pub struct PreparingSuccessor {
     pub executors: [NodeEndpoint; 4],
 }
 
-/// The same durable group key retains the complete first move and preparation.
+/// A receiver's acknowledgement of durable local predecessor seal and drain.
+/// Runtime construction and causality are a later checkpoint, not a certificate.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SealReceipt {
+    pub endpoint: NodeEndpoint,
+    pub data_group: GroupId,
+    pub predecessor_revision: u64,
+    pub predecessor_job_id: MoveJobId,
+}
+
+/// Actual data-log fence identity, explicitly bound to both jobs and the group.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HandoffFenceReceipt {
+    pub data_group: GroupId,
+    pub predecessor_revision: u64,
+    pub predecessor_job_id: MoveJobId,
+    pub successor_job_id: MoveJobId,
+    pub committed: CommittedLogPosition,
+}
+
+/// Fixed evidence retained by an internal activation. Static validation checks
+/// binding and history coverage; actual seal-before-fence ordering is runtime work.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HandoffProof {
+    pub seals: [SealReceipt; 4],
+    pub fence: HandoffFenceReceipt,
+    pub observed: AppliedMembership,
+}
+
+/// The sole runnable successor retains its original handoff evidence forever.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AcceptedSuccessor {
+    pub record: MoveRecord,
+    pub handoff: HandoffProof,
+}
+
+/// Mutually exclusive in-memory states; the durable encoding has no enum tag.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SuccessorState {
+    Preparing(Box<PreparingSuccessor>),
+    Accepted(Box<AcceptedSuccessor>),
+}
+
+/// Complete first job plus at most one successor at the same durable group key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredMoves {
     pub first: MoveRecord,
-    pub preparing: Option<PreparingSuccessor>,
+    pub successor: Option<SuccessorState>,
+}
+
+impl StoredMoves {
+    pub fn preparing(&self) -> Option<&PreparingSuccessor> {
+        match &self.successor {
+            Some(SuccessorState::Preparing(preparing)) => Some(preparing),
+            _ => None,
+        }
+    }
 }
 
 /// Encodes a bounded group record, preserving legacy bytes without preparation.
@@ -220,14 +317,14 @@ pub fn decode_stored_moves(bytes: &[u8]) -> Result<StoredMoves, MetadataError> {
 
 /// One bounded metadata snapshot, loaded only for a metadata command.
 ///
-/// Each data group retains its first job and at most one non-runnable successor
-/// preparation. Apply decides a complete transition before replacing any field.
+/// Each data group retains its first job and at most one preparing or accepted
+/// successor. Apply decides a complete transition before replacing any field.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MetadataView {
     pub(super) current: Option<ClusterDirectory>,
     pub(super) origin: Option<ClusterDirectory>,
     pub(super) jobs: BTreeMap<GroupId, MoveRecord>,
-    pub(super) preparing: BTreeMap<GroupId, PreparingSuccessor>,
+    pub(super) successors: BTreeMap<GroupId, SuccessorState>,
 }
 
 impl MetadataView {
@@ -244,7 +341,7 @@ impl MetadataView {
             current,
             origin,
             jobs,
-            preparing: BTreeMap::new(),
+            successors: BTreeMap::new(),
         };
         validation::validate_view(&view)?;
         Ok(view)
@@ -266,18 +363,18 @@ impl MetadataView {
             return Err(MetadataError::Corrupt("too many move records"));
         }
         let mut jobs = BTreeMap::new();
-        let mut preparing = BTreeMap::new();
+        let mut successors = BTreeMap::new();
         for (group, stored) in records {
             jobs.insert(group, stored.first);
-            if let Some(candidate) = stored.preparing {
-                preparing.insert(group, candidate);
+            if let Some(candidate) = stored.successor {
+                successors.insert(group, candidate);
             }
         }
         let view = Self {
             current,
             origin,
             jobs,
-            preparing,
+            successors,
         };
         validation::validate_view(&view)?;
         Ok(view)
@@ -325,12 +422,29 @@ impl MetadataView {
         self.origin.as_ref()
     }
     pub fn job(&self, group: GroupId) -> Option<&MoveRecord> {
+        self.accepted_successor(group)
+            .map(|accepted| &accepted.record)
+            .or_else(|| self.first_job(group))
+    }
+
+    /// Immutable first job, including its retained completion identity.
+    pub fn first_job(&self, group: GroupId) -> Option<&MoveRecord> {
         self.jobs.get(&group)
+    }
+
+    pub fn accepted_successor(&self, group: GroupId) -> Option<&AcceptedSuccessor> {
+        match self.successors.get(&group) {
+            Some(SuccessorState::Accepted(accepted)) => Some(accepted),
+            _ => None,
+        }
     }
 
     /// Returns a frozen preparation without exposing it as an accepted job.
     pub fn prepared_successor(&self, group: GroupId) -> Option<&PreparingSuccessor> {
-        self.preparing.get(&group)
+        match self.successors.get(&group) {
+            Some(SuccessorState::Preparing(preparing)) => Some(preparing),
+            _ => None,
+        }
     }
 
     /// Computes effects before updating this in-memory view.
@@ -354,6 +468,19 @@ impl MetadataView {
                 predecessor_job_id,
                 intent,
             } => self.prepare(predecessor_job_id, intent),
+            MetadataCommand::ActivateSuccessor {
+                expected_directory_revision,
+                data_group,
+                predecessor_job_id,
+                successor_job_id,
+                proof,
+            } => self.activate(
+                expected_directory_revision,
+                data_group,
+                predecessor_job_id,
+                successor_job_id,
+                *proof,
+            ),
         }
     }
 
@@ -421,8 +548,13 @@ impl MetadataView {
         if !validation::same_voters(current.voters(intent.data_group), &intent.old_voters) {
             return Ok(conflict(ConflictReason::PlacementMismatch));
         }
-        if validation::validate_union(current, &self.jobs, &self.preparing, Some(&intent.add_node))
-            .is_err()
+        if validation::validate_union(
+            current,
+            &self.jobs,
+            &self.successors,
+            Some(&intent.add_node),
+        )
+        .is_err()
         {
             return Ok(conflict(ConflictReason::EndpointUnion));
         }
@@ -459,15 +591,20 @@ impl MetadataView {
         }
         // An unrelated group's publication may advance the global revision.
         // An exact retry still names the original frozen preparation.
-        if let Some(existing) = self.preparing.get(&intent.data_group) {
-            return Ok(if existing.intent == intent {
-                no_effects(MetadataResult::AlreadyPrepared {
-                    data_group: intent.data_group,
-                    job_id: intent.job_id,
-                })
-            } else {
-                conflict(ConflictReason::ExistingMove)
-            });
+        if let Some(existing) = self.successors.get(&intent.data_group) {
+            // Once accepted, preparation cannot downgrade the slot. A runtime
+            // retry must first read the accepted job and resume that identity.
+            return Ok(
+                if matches!(existing, SuccessorState::Preparing(preparing) if preparing.intent == intent)
+                {
+                    no_effects(MetadataResult::AlreadyPrepared {
+                        data_group: intent.data_group,
+                        job_id: intent.job_id,
+                    })
+                } else {
+                    conflict(ConflictReason::ExistingMove)
+                },
+            );
         }
         if intent.validate().is_err() {
             return Ok(conflict(ConflictReason::InvalidIntent));
@@ -484,8 +621,13 @@ impl MetadataView {
         {
             return Ok(conflict(ConflictReason::PlacementMismatch));
         }
-        if validation::validate_union(current, &self.jobs, &self.preparing, Some(&intent.add_node))
-            .is_err()
+        if validation::validate_union(
+            current,
+            &self.jobs,
+            &self.successors,
+            Some(&intent.add_node),
+        )
+        .is_err()
         {
             return Ok(conflict(ConflictReason::EndpointUnion));
         }
@@ -497,14 +639,81 @@ impl MetadataView {
         };
         let moves = StoredMoves {
             first: first.clone(),
-            preparing: Some(preparation.clone()),
+            successor: Some(SuccessorState::Preparing(Box::new(preparation.clone()))),
         };
-        let effects = encoding::preparation_effect(group, &moves)?;
-        self.preparing.insert(group, preparation);
+        let effects = encoding::stored_effect(group, &moves)?;
+        self.successors
+            .insert(group, SuccessorState::Preparing(Box::new(preparation)));
         Ok(MetadataTransition {
             result: MetadataResult::Prepared {
                 data_group: group,
                 job_id,
+            },
+            effects,
+        })
+    }
+
+    fn activate(
+        &mut self,
+        expected_revision: u64,
+        group: GroupId,
+        predecessor_job_id: MoveJobId,
+        successor_job_id: MoveJobId,
+        proof: HandoffProof,
+    ) -> Result<MetadataTransition, MetadataError> {
+        let Some(first) = self.first_job(group) else {
+            return Ok(conflict(ConflictReason::UnknownMove));
+        };
+        if first.intent.job_id != predecessor_job_id {
+            return Ok(conflict(ConflictReason::ExistingMove));
+        }
+        let Some(successor) = self.successors.get(&group) else {
+            return Ok(conflict(ConflictReason::UnknownMove));
+        };
+        if let SuccessorState::Accepted(accepted) = successor {
+            return Ok(if accepted.record.intent.job_id == successor_job_id {
+                no_effects(MetadataResult::AlreadyActivated {
+                    data_group: group,
+                    job_id: successor_job_id,
+                })
+            } else {
+                conflict(ConflictReason::ExistingMove)
+            });
+        }
+        let SuccessorState::Preparing(preparing) = successor else {
+            return Err(MetadataError::Corrupt("unknown successor state"));
+        };
+        if preparing.intent.job_id != successor_job_id {
+            return Ok(conflict(ConflictReason::ExistingMove));
+        }
+        let current = self
+            .current
+            .as_ref()
+            .ok_or(MetadataError::Corrupt("job without directory"))?;
+        if current.revision != expected_revision {
+            return Ok(conflict(ConflictReason::RevisionMismatch));
+        }
+        if validation::validate_handoff(current, first, &preparing.intent, &proof).is_err() {
+            return Ok(conflict(ConflictReason::MembershipMismatch));
+        }
+        let accepted = AcceptedSuccessor {
+            record: MoveRecord {
+                intent: preparing.intent.clone(),
+                progress: MoveProgress::Pending,
+            },
+            handoff: proof,
+        };
+        let moves = StoredMoves {
+            first: first.clone(),
+            successor: Some(SuccessorState::Accepted(Box::new(accepted.clone()))),
+        };
+        let effects = encoding::stored_effect(group, &moves)?;
+        self.successors
+            .insert(group, SuccessorState::Accepted(Box::new(accepted)));
+        Ok(MetadataTransition {
+            result: MetadataResult::Activated {
+                data_group: group,
+                job_id: successor_job_id,
             },
             effects,
         })
@@ -517,12 +726,19 @@ impl MetadataView {
         job_id: MoveJobId,
         observation: MembershipObservation,
     ) -> Result<MetadataTransition, MetadataError> {
-        let Some(record) = self.jobs.get(&group) else {
+        let Some(first) = self.first_job(group) else {
             return Ok(conflict(ConflictReason::UnknownMove));
         };
-        if record.intent.job_id != job_id {
+        let accepted = self.accepted_successor(group);
+        let (record, completing_successor) = if first.intent.job_id == job_id {
+            (first, None)
+        } else if let Some(accepted) =
+            accepted.filter(|accepted| accepted.record.intent.job_id == job_id)
+        {
+            (&accepted.record, Some(accepted))
+        } else {
             return Ok(conflict(ConflictReason::ExistingMove));
-        }
+        };
         let current = self
             .current
             .as_ref()
@@ -543,6 +759,11 @@ impl MetadataView {
             || observation.voters != record.intent.target_voters
             || observation.replacement_endpoint != record.intent.add_node
         {
+            return Ok(conflict(ConflictReason::MembershipMismatch));
+        }
+        if completing_successor.is_some_and(|accepted| {
+            !validation::strictly_after(observation.membership, accepted.handoff.fence.committed)
+        }) {
             return Ok(conflict(ConflictReason::MembershipMismatch));
         }
         let Some(revision) = current.revision.checked_add(1) else {
@@ -566,10 +787,27 @@ impl MetadataView {
                 membership: observation.membership,
             },
         };
-        let effects = encoding::completion_effects(&directory, group, &completed)?;
-        // No mutation occurs until every output has passed its size check.
+        let updated_successor = completing_successor.map(|accepted| AcceptedSuccessor {
+            record: completed.clone(),
+            handoff: accepted.handoff.clone(),
+        });
+        let effects = if let Some(accepted) = &updated_successor {
+            let moves = StoredMoves {
+                first: first.clone(),
+                successor: Some(SuccessorState::Accepted(Box::new(accepted.clone()))),
+            };
+            encoding::successor_completion_effects(&directory, group, &moves)?
+        } else {
+            encoding::completion_effects(&directory, group, &completed)?
+        };
+        // Count and encode every effect before changing either slot/directory.
         self.current = Some(directory);
-        self.jobs.insert(group, completed);
+        if let Some(accepted) = updated_successor {
+            self.successors
+                .insert(group, SuccessorState::Accepted(Box::new(accepted)));
+        } else {
+            self.jobs.insert(group, completed);
+        }
         Ok(MetadataTransition {
             result: MetadataResult::Completed {
                 data_group: group,

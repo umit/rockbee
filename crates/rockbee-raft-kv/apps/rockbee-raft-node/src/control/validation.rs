@@ -1,20 +1,24 @@
-//! Cross-record invariants for the first move and one frozen preparation.
+//! Cross-record invariants for one first move and one preparing/accepted successor.
 use std::collections::BTreeMap;
 
 use rockbee_raft_protocol::{
     GroupId, NodeId,
-    control::{MoveProgress, MoveRecord},
+    backend::ObservedLogPosition,
+    control::{CommittedLogPosition, MoveIntent, MoveProgress, MoveRecord},
     routing::{ClusterDirectory, MAX_DIRECTORY_NODES, NodeEndpoint},
 };
 
 use super::{
     encoding::check_size,
-    model::{MAX_DIRECTORY_BYTES, MAX_JOB_BYTES, MetadataError, MetadataView, PreparingSuccessor},
+    model::{
+        HandoffProof, MAX_DIRECTORY_BYTES, MAX_JOB_BYTES, MetadataError, MetadataView,
+        SuccessorState,
+    },
 };
 
 pub(super) fn validate_view(view: &MetadataView) -> Result<(), MetadataError> {
     let Some(current) = &view.current else {
-        return if view.origin.is_none() && view.jobs.is_empty() && view.preparing.is_empty() {
+        return if view.origin.is_none() && view.jobs.is_empty() && view.successors.is_empty() {
             Ok(())
         } else {
             Err(MetadataError::Corrupt("records without current directory"))
@@ -26,7 +30,7 @@ pub(super) fn validate_view(view: &MetadataView) -> Result<(), MetadataError> {
         // exact configured origin can be adopted, but no move can begin yet.
         return if validate_bootstrap_shape(current).is_ok()
             && view.jobs.is_empty()
-            && view.preparing.is_empty()
+            && view.successors.is_empty()
         {
             Ok(())
         } else {
@@ -44,10 +48,10 @@ pub(super) fn validate_view(view: &MetadataView) -> Result<(), MetadataError> {
         return Err(MetadataError::Corrupt("too many move records"));
     }
     validate_jobs(view, current, origin)?;
-    validate_catalog(current, origin, &view.jobs)?;
-    validate_placements(current, origin, &view.jobs)?;
-    validate_preparations(view, current)?;
-    validate_union(current, &view.jobs, &view.preparing, None)
+    validate_catalog(current, origin, view)?;
+    validate_placements(current, origin, view)?;
+    validate_successors(view, current)?;
+    validate_union(current, &view.jobs, &view.successors, None)
 }
 
 fn validate_directory(directory: &ClusterDirectory) -> Result<(), MetadataError> {
@@ -87,7 +91,6 @@ fn validate_jobs(
     current: &ClusterDirectory,
     origin: &ClusterDirectory,
 ) -> Result<(), MetadataError> {
-    let mut completed = 0u64;
     for (group, record) in &view.jobs {
         record.validate()?;
         check_size(record, MAX_JOB_BYTES)?;
@@ -101,6 +104,11 @@ fn validate_jobs(
                 "move record does not match origin or key",
             ));
         }
+    }
+    let mut completed = 0u64;
+    for record in retained_records(view) {
+        record.validate()?;
+        check_size(record, MAX_JOB_BYTES)?;
         if matches!(record.progress, MoveProgress::Completed { .. }) {
             if record.intent.expected_directory_revision >= current.revision {
                 return Err(MetadataError::Corrupt(
@@ -112,8 +120,8 @@ fn validate_jobs(
                 .ok_or(MetadataError::Corrupt("completed move count overflow"))?;
         }
     }
-    // This slice has one lifetime move per group and no other directory
-    // mutation. Every increment must therefore have one retained completion.
+    // Count BOTH retained slots globally. Preparing/activation do not publish
+    // placement; every directory increment has one retained completion.
     if completed.checked_add(1) != Some(current.revision) {
         return Err(MetadataError::Corrupt(
             "directory revision lacks matching completed moves",
@@ -122,16 +130,30 @@ fn validate_jobs(
     Ok(())
 }
 
-fn validate_preparations(
+fn retained_records(view: &MetadataView) -> impl Iterator<Item = &MoveRecord> {
+    view.jobs.values().chain(
+        view.successors
+            .values()
+            .filter_map(|successor| match successor {
+                SuccessorState::Accepted(accepted) => Some(&accepted.record),
+                SuccessorState::Preparing(_) => None,
+            }),
+    )
+}
+
+fn validate_successors(
     view: &MetadataView,
     current: &ClusterDirectory,
 ) -> Result<(), MetadataError> {
-    for (group, preparing) in &view.preparing {
+    for (group, successor) in &view.successors {
         let first = view
             .jobs
             .get(group)
-            .ok_or(MetadataError::Corrupt("preparation lacks first move"))?;
-        let intent = &preparing.intent;
+            .ok_or(MetadataError::Corrupt("successor lacks first move"))?;
+        let intent = match successor {
+            SuccessorState::Preparing(preparing) => &preparing.intent,
+            SuccessorState::Accepted(accepted) => &accepted.record.intent,
+        };
         intent.validate()?;
         if !matches!(first.progress, MoveProgress::Completed { .. })
             || intent.data_group != *group
@@ -139,20 +161,103 @@ fn validate_preparations(
             || intent.expected_directory_revision <= first.intent.expected_directory_revision
             || intent.expected_directory_revision > current.revision
             || intent.old_voters != first.intent.target_voters
-            || !same_voters(current.voters(*group), &intent.old_voters)
         {
             return Err(MetadataError::Corrupt(
-                "preparation does not follow completed first move",
+                "successor does not follow completed first move",
             ));
         }
-        if preparing.executors != predecessor_executors(current, first)? {
-            return Err(MetadataError::Corrupt(
-                "preparation executor census differs from predecessor",
-            ));
+        match successor {
+            SuccessorState::Preparing(preparing) => {
+                if !same_voters(current.voters(*group), &intent.old_voters)
+                    || preparing.executors != predecessor_executors(current, first)?
+                {
+                    return Err(MetadataError::Corrupt(
+                        "preparation placement or executor census differs",
+                    ));
+                }
+                super::encoding::prepared_size(first, preparing)?;
+            }
+            SuccessorState::Accepted(accepted) => {
+                validate_handoff(current, first, intent, &accepted.handoff)?;
+                if let MoveProgress::Completed { membership } = accepted.record.progress
+                    && !strictly_after(membership, accepted.handoff.fence.committed)
+                {
+                    return Err(MetadataError::Corrupt(
+                        "successor completion does not follow handoff fence",
+                    ));
+                }
+                super::encoding::accepted_size(first, accepted)?;
+            }
         }
-        super::encoding::prepared_size(first, preparing)?;
     }
     Ok(())
+}
+
+/// Binding and ordering checks on retained evidence. This does not establish
+/// that network acknowledgements actually preceded the native fence call.
+pub(super) fn validate_handoff(
+    current: &ClusterDirectory,
+    first: &MoveRecord,
+    intent: &MoveIntent,
+    proof: &HandoffProof,
+) -> Result<(), MetadataError> {
+    let invalid =
+        || MetadataError::Corrupt("handoff evidence does not match predecessor and successor");
+    let MoveProgress::Completed { membership } = first.progress else {
+        return Err(invalid());
+    };
+    let group = first.intent.data_group;
+    for (receipt, endpoint) in proof
+        .seals
+        .iter()
+        .zip(predecessor_executors(current, first)?)
+    {
+        if receipt.endpoint != endpoint
+            || receipt.data_group != group
+            || receipt.predecessor_revision != first.intent.expected_directory_revision
+            || receipt.predecessor_job_id != first.intent.job_id
+        {
+            return Err(invalid());
+        }
+    }
+    let fence = &proof.fence;
+    if fence.data_group != group
+        || fence.predecessor_revision != first.intent.expected_directory_revision
+        || fence.predecessor_job_id != first.intent.job_id
+        || fence.successor_job_id != intent.job_id
+        || !strictly_after(fence.committed, membership)
+    {
+        return Err(invalid());
+    }
+    let observed = &proof.observed;
+    observed.validate()?;
+    if observed.data_group != group
+        || observed.joint_voters.is_some()
+        || observed.voters != first.intent.target_voters
+        || !covers(observed.applied, fence.committed)
+        || !covers(observed.membership, membership)
+        || observed.peers.iter().flatten().count() != 3
+    {
+        return Err(invalid());
+    }
+    for voter in first.intent.target_voters {
+        if current.node(voter).map(|node| node.peer_address) != observed.peer(voter) {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+fn covers(actual: ObservedLogPosition, required: CommittedLogPosition) -> bool {
+    let actual_leader = (actual.term, actual.leader_node_id);
+    let required_leader = (required.term, required.leader_node_id.get());
+    (actual.index == required.index && actual_leader == required_leader)
+        || (actual.index > required.index && actual_leader >= required_leader)
+}
+
+pub(super) fn strictly_after(actual: CommittedLogPosition, required: CommittedLogPosition) -> bool {
+    actual.index > required.index
+        && (actual.term, actual.leader_node_id) >= (required.term, required.leader_node_id)
 }
 
 /// For the first move only, old voters plus its sole added node exhaust every
@@ -185,7 +290,7 @@ pub(super) fn predecessor_executors(
 fn validate_catalog(
     current: &ClusterDirectory,
     origin: &ClusterDirectory,
-    jobs: &BTreeMap<GroupId, MoveRecord>,
+    view: &MetadataView,
 ) -> Result<(), MetadataError> {
     for endpoint in &origin.nodes {
         if current.node(endpoint.node_id) != Some(endpoint) {
@@ -196,7 +301,7 @@ fn validate_catalog(
     }
     for endpoint in &current.nodes {
         if origin.node(endpoint.node_id).is_none()
-            && !jobs.values().any(|record| {
+            && !retained_records(view).any(|record| {
                 matches!(record.progress, MoveProgress::Completed { .. })
                     && record.intent.add_node == *endpoint
             })
@@ -206,7 +311,7 @@ fn validate_catalog(
             ));
         }
     }
-    for record in jobs.values() {
+    for record in retained_records(view) {
         if matches!(record.progress, MoveProgress::Completed { .. })
             && current.node(record.intent.add_node.node_id) != Some(&record.intent.add_node)
         {
@@ -219,10 +324,10 @@ fn validate_catalog(
 fn validate_placements(
     current: &ClusterDirectory,
     origin: &ClusterDirectory,
-    jobs: &BTreeMap<GroupId, MoveRecord>,
+    view: &MetadataView,
 ) -> Result<(), MetadataError> {
     for placement in &origin.placements {
-        let expected = match jobs.get(&placement.group_id) {
+        let expected = match view.job(placement.group_id) {
             Some(record) if matches!(record.progress, MoveProgress::Completed { .. }) => {
                 record.intent.target_voters.as_slice()
             }
@@ -249,7 +354,7 @@ pub(super) fn same_voters(actual: Option<&[NodeId]>, expected: &[NodeId]) -> boo
 pub(super) fn validate_union(
     current: &ClusterDirectory,
     jobs: &BTreeMap<GroupId, MoveRecord>,
-    preparing: &BTreeMap<GroupId, PreparingSuccessor>,
+    successors: &BTreeMap<GroupId, SuccessorState>,
     prospective: Option<&NodeEndpoint>,
 ) -> Result<(), MetadataError> {
     let mut nodes = BTreeMap::new();
@@ -257,11 +362,10 @@ pub(super) fn validate_union(
         .nodes
         .iter()
         .chain(jobs.values().map(|record| &record.intent.add_node))
-        .chain(
-            preparing
-                .values()
-                .map(|candidate| &candidate.intent.add_node),
-        )
+        .chain(successors.values().map(|successor| match successor {
+            SuccessorState::Preparing(candidate) => &candidate.intent.add_node,
+            SuccessorState::Accepted(accepted) => &accepted.record.intent.add_node,
+        }))
         .chain(prospective)
     {
         insert_endpoint(&mut nodes, endpoint)?;

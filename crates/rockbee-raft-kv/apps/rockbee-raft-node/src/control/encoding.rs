@@ -3,9 +3,9 @@ use rockbee_raft_protocol::{GroupId, control::MoveRecord, routing::ClusterDirect
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::model::{
-    DIRECTORY_KEY, JOB_KEY_PREFIX, MAX_DIRECTORY_BYTES, MAX_JOB_BYTES, MAX_STORED_MOVES_BYTES,
-    METADATA_EFFECT_RESERVATION, MetadataEffect, MetadataError, ORIGIN_KEY, PreparingSuccessor,
-    StoredMoves,
+    AcceptedSuccessor, DIRECTORY_KEY, JOB_KEY_PREFIX, MAX_DIRECTORY_BYTES, MAX_JOB_BYTES,
+    MAX_STORED_MOVES_BYTES, METADATA_EFFECT_RESERVATION, MetadataEffect, MetadataError, ORIGIN_KEY,
+    PreparingSuccessor, StoredMoves, SuccessorState,
 };
 
 /// Conservative per-effect allowance for generation prefix and native put
@@ -87,11 +87,25 @@ pub(super) fn completion_effects(
     ])
 }
 
-pub(super) fn preparation_effect(
+pub(super) fn stored_effect(
     group: GroupId,
     moves: &StoredMoves,
 ) -> Result<Vec<MetadataEffect>, MetadataError> {
     encode_effects(&[PlannedEffect::Stored { group, moves }])
+}
+
+pub(super) fn successor_completion_effects(
+    directory: &ClusterDirectory,
+    group: GroupId,
+    moves: &StoredMoves,
+) -> Result<Vec<MetadataEffect>, MetadataError> {
+    encode_effects(&[
+        PlannedEffect::Directory {
+            key: DIRECTORY_KEY,
+            directory,
+        },
+        PlannedEffect::Stored { group, moves },
+    ])
 }
 
 enum PlannedEffect<'a> {
@@ -158,6 +172,7 @@ fn encode_effects(plans: &[PlannedEffect<'_>]) -> Result<Vec<MetadataEffect>, Me
 // Keep the ordinary four-byte frame; the discriminator belongs to its payload.
 const PREPARED_MARKER: [u8; 16] = [0; 16];
 const PREPARED_VERSION: u8 = 2;
+const ACCEPTED_VERSION: u8 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct PreparedMoves<First, Preparing> {
@@ -189,9 +204,41 @@ pub(super) fn prepared_size(
     check_size(&prepared_wire(first, preparing), MAX_STORED_MOVES_BYTES)
 }
 
+#[derive(Serialize, Deserialize)]
+struct AcceptedMoves<First, Accepted> {
+    marker: [u8; 16],
+    version: u8,
+    first: First,
+    accepted: Accepted,
+}
+
+fn accepted_wire<'a>(
+    first: &'a MoveRecord,
+    accepted: &'a AcceptedSuccessor,
+) -> AcceptedMoves<&'a MoveRecord, &'a AcceptedSuccessor> {
+    AcceptedMoves {
+        marker: PREPARED_MARKER,
+        version: ACCEPTED_VERSION,
+        first,
+        accepted,
+    }
+}
+
+pub(super) fn accepted_size(
+    first: &MoveRecord,
+    accepted: &AcceptedSuccessor,
+) -> Result<usize, MetadataError> {
+    first.validate()?;
+    accepted.record.validate()?;
+    check_size(first, MAX_JOB_BYTES)?;
+    check_size(&accepted.record, MAX_JOB_BYTES)?;
+    check_size(&accepted_wire(first, accepted), MAX_STORED_MOVES_BYTES)
+}
+
 fn stored_size(moves: &StoredMoves) -> Result<usize, MetadataError> {
-    match &moves.preparing {
-        Some(preparing) => prepared_size(&moves.first, preparing),
+    match &moves.successor {
+        Some(SuccessorState::Preparing(preparing)) => prepared_size(&moves.first, preparing),
+        Some(SuccessorState::Accepted(accepted)) => accepted_size(&moves.first, accepted),
         None => {
             moves.first.validate()?;
             check_size(&moves.first, MAX_JOB_BYTES)
@@ -201,9 +248,12 @@ fn stored_size(moves: &StoredMoves) -> Result<usize, MetadataError> {
 
 pub(super) fn encode_stored_moves(moves: &StoredMoves) -> Result<Vec<u8>, MetadataError> {
     stored_size(moves)?;
-    Ok(match &moves.preparing {
-        Some(preparing) => {
+    Ok(match &moves.successor {
+        Some(SuccessorState::Preparing(preparing)) => {
             rockbee_raft_protocol::encode_frame(&prepared_wire(&moves.first, preparing))?
+        }
+        Some(SuccessorState::Accepted(accepted)) => {
+            rockbee_raft_protocol::encode_frame(&accepted_wire(&moves.first, accepted))?
         }
         None => rockbee_raft_protocol::encode_frame(&moves.first)?,
     })
@@ -213,23 +263,35 @@ pub(super) fn decode_stored_moves(bytes: &[u8]) -> Result<StoredMoves, MetadataE
     if bytes.len() > MAX_STORED_MOVES_BYTES {
         return Err(MetadataError::EncodedLimit);
     }
-    if bytes.get(4..20) == Some(PREPARED_MARKER.as_slice()) {
-        let wire: PreparedMoves<MoveRecord, PreparingSuccessor> =
-            decode_bounded(bytes, MAX_STORED_MOVES_BYTES)?;
-        if wire.marker != PREPARED_MARKER || wire.version != PREPARED_VERSION {
-            return Err(MetadataError::Corrupt("unknown prepared move version"));
-        }
-        prepared_size(&wire.first, &wire.preparing)?;
-        Ok(StoredMoves {
-            first: wire.first,
-            preparing: Some(wire.preparing),
-        })
-    } else {
-        // Only unmarked values can be legacy. A marked parse failure returns
-        // directly, and the actual legacy decoder rejects the reserved zero ID.
-        Ok(StoredMoves {
+    if bytes.get(4..20) != Some(PREPARED_MARKER.as_slice()) {
+        return Ok(StoredMoves {
             first: decode_bounded(bytes, MAX_JOB_BYTES)?,
-            preparing: None,
-        })
+            successor: None,
+        });
+    }
+    // V2's concrete Preparing payload is frozen. V3 is Accepted-only, with no
+    // encoded enum tag and no fallback after any marked parse/version failure.
+    match bytes.get(20).copied() {
+        Some(PREPARED_VERSION) => {
+            let wire: PreparedMoves<MoveRecord, PreparingSuccessor> =
+                decode_bounded(bytes, MAX_STORED_MOVES_BYTES)?;
+            prepared_size(&wire.first, &wire.preparing)?;
+            Ok(StoredMoves {
+                first: wire.first,
+                successor: Some(SuccessorState::Preparing(Box::new(wire.preparing))),
+            })
+        }
+        Some(ACCEPTED_VERSION) => {
+            let wire: AcceptedMoves<MoveRecord, AcceptedSuccessor> =
+                decode_bounded(bytes, MAX_STORED_MOVES_BYTES)?;
+            accepted_size(&wire.first, &wire.accepted)?;
+            Ok(StoredMoves {
+                first: wire.first,
+                successor: Some(SuccessorState::Accepted(Box::new(wire.accepted))),
+            })
+        }
+        _ => Err(MetadataError::Corrupt(
+            "unknown or missing stored move version",
+        )),
     }
 }

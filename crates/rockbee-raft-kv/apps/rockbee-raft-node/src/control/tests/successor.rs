@@ -2,7 +2,7 @@
 use super::*;
 use serde::Serialize;
 
-fn completed() -> (MetadataView, MoveRecord) {
+pub(super) fn completed() -> (MetadataView, MoveRecord) {
     let first = intent(1, 11, 4);
     let mut view = pending(&first);
     view.apply(complete(&first, 1)).unwrap();
@@ -10,7 +10,7 @@ fn completed() -> (MetadataView, MoveRecord) {
     (view, record)
 }
 
-fn candidate(view: &MetadataView, add: u64) -> MoveIntent {
+pub(super) fn candidate(view: &MetadataView, add: u64) -> MoveIntent {
     MoveReplica {
         job_id: MoveJobId::new([12; 16]).unwrap(),
         data_group: GroupId::new(1),
@@ -25,10 +25,10 @@ fn candidate(view: &MetadataView, add: u64) -> MoveIntent {
 fn stored(view: &MetadataView, first: MoveRecord) -> StoredMoves {
     StoredMoves {
         first,
-        preparing: Some(PreparingSuccessor {
+        successor: Some(SuccessorState::Preparing(Box::new(PreparingSuccessor {
             intent: candidate(view, 3),
             executors: [endpoint(1), endpoint(2), endpoint(3), endpoint(4)],
-        }),
+        }))),
     }
 }
 
@@ -48,12 +48,12 @@ struct V2Fixture<'a> {
     preparing: &'a PreparingSuccessor,
 }
 
-fn v2_frame(moves: &StoredMoves, version: u8) -> Vec<u8> {
+pub(super) fn v2_frame(moves: &StoredMoves, version: u8) -> Vec<u8> {
     rockbee_raft_protocol::encode_frame(&V2Fixture {
         marker: [0; 16],
         version,
         first: &moves.first,
-        preparing: moves.preparing.as_ref().unwrap(),
+        preparing: moves.preparing().unwrap(),
     })
     .unwrap()
 }
@@ -83,7 +83,7 @@ fn successor_prepare_preserves_first_directory_and_public_rejection() {
     assert_eq!(view.job(GroupId::new(1)), Some(&first));
     assert_eq!(
         view.prepared_successor(GroupId::new(1)),
-        stored(&before, first.clone()).preparing.as_ref()
+        stored(&before, first.clone()).preparing()
     );
     let reloaded = decode_stored_moves(&transition.effects[0].value).unwrap();
     assert_eq!(load(&before, reloaded).unwrap(), view);
@@ -149,14 +149,14 @@ fn successor_census_is_group_specific_and_completed_count_is_global() {
             GroupId::new(1),
             StoredMoves {
                 first,
-                preparing: Some(preparing.clone()),
+                successor: Some(SuccessorState::Preparing(Box::new(preparing.clone()))),
             },
         ),
         (
             GroupId::new(2),
             StoredMoves {
                 first: view.job(GroupId::new(2)).unwrap().clone(),
-                preparing: None,
+                successor: None,
             },
         ),
     ]);
@@ -175,7 +175,7 @@ fn successor_legacy_bytes_remain_exact_including_zero_leading_job_id() {
     first.intent.job_id = MoveJobId::new(id).unwrap();
     let moves = StoredMoves {
         first: first.clone(),
-        preparing: None,
+        successor: None,
     };
     let legacy = rockbee_raft_protocol::encode_frame(&first).unwrap();
     assert_eq!(encode_stored_moves(&moves).unwrap(), legacy);
@@ -199,7 +199,7 @@ fn successor_v2_same_key_roundtrip_and_actual_legacy_decoder_rejection() {
         load(&view, moves.clone())
             .unwrap()
             .prepared_successor(GroupId::new(1)),
-        moves.preparing.as_ref()
+        moves.preparing()
     );
 }
 
@@ -249,7 +249,14 @@ fn successor_cross_record_validation_rejects_forged_preparations() {
     load(&view, good.clone()).unwrap();
     for variant in 0..7 {
         let mut malformed = good.clone();
-        let preparing = malformed.preparing.as_mut().unwrap();
+        let preparing = malformed
+            .successor
+            .as_mut()
+            .and_then(|successor| match successor {
+                SuccessorState::Preparing(preparing) => Some(preparing),
+                SuccessorState::Accepted(_) => None,
+            })
+            .unwrap();
         match variant {
             0 => preparing.executors.swap(0, 1),
             1 => preparing.executors[2] = endpoint(5),
@@ -282,17 +289,17 @@ fn successor_pending_endpoint_union_includes_preparing_candidates() {
             GroupId::new(1),
             StoredMoves {
                 first,
-                preparing: Some(PreparingSuccessor {
+                successor: Some(SuccessorState::Preparing(Box::new(PreparingSuccessor {
                     intent: successor,
                     executors: [endpoint(1), endpoint(2), endpoint(3), endpoint(4)],
-                }),
+                }))),
             },
         ),
         (
             GroupId::new(2),
             StoredMoves {
                 first: view.job(GroupId::new(2)).unwrap().clone(),
-                preparing: None,
+                successor: None,
             },
         ),
     ]);
@@ -504,7 +511,7 @@ fn successor_largest_current_shape_fits_counted_envelope_and_effect_reservation(
     assert_eq!(transition.effects.len(), 1);
     let effect = &transition.effects[0];
     let moves = decode_stored_moves(&effect.value).unwrap();
-    assert_eq!(moves.preparing.as_ref().unwrap().executors, endpoints);
+    assert_eq!(moves.preparing().unwrap().executors, endpoints);
     assert_eq!(effect.value.len(), v2_frame(&moves, 2).len());
     assert!(effect.value.len() <= MAX_STORED_MOVES_BYTES);
     assert!(effect.key.len() + effect.value.len() + 64 <= METADATA_EFFECT_RESERVATION);

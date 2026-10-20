@@ -1,7 +1,7 @@
 //! Preparation is durable metadata only; it never selects a new native job.
 use super::*;
 
-async fn seed_completed(stores: &mut GroupStores) -> MoveRecord {
+pub(super) async fn seed_completed(stores: &mut GroupStores) -> MoveRecord {
     let first = movement(1, 21, 4);
     let proof = CommittedLogPosition {
         term: 7,
@@ -48,7 +48,7 @@ async fn seed_completed(stores: &mut GroupStores) -> MoveRecord {
     }
 }
 
-fn successor(first: &MoveRecord, directory: &ClusterDirectory) -> MoveIntent {
+pub(super) fn successor(first: &MoveRecord, directory: &ClusterDirectory) -> MoveIntent {
     MoveReplica {
         job_id: MoveJobId::new([22; 16]).unwrap(),
         data_group: first.intent.data_group,
@@ -60,14 +60,14 @@ fn successor(first: &MoveRecord, directory: &ClusterDirectory) -> MoveIntent {
     .unwrap()
 }
 
-fn prepare(first: &MoveRecord, intent: &MoveIntent) -> MetadataCommand {
+pub(super) fn prepare(first: &MoveRecord, intent: &MoveIntent) -> MetadataCommand {
     MetadataCommand::PrepareSuccessor {
         predecessor_job_id: first.intent.job_id,
         intent: intent.clone(),
     }
 }
 
-async fn raw_job(stores: &GroupStores, group: GroupId) -> Bytes {
+pub(super) async fn raw_job(stores: &GroupStores, group: GroupId) -> Bytes {
     stores
         .state_machine
         .reader()
