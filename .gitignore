@@ -10,3 +10,6 @@ __pycache__/
 /docs/
 /slate-experiment-report.json
 /gateway-experiment-report.json
+
+# Local Raft plans, reviews, and verification notes.
+/crates/rockbee-raft-kv/docs/

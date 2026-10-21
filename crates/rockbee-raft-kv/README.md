@@ -75,9 +75,6 @@ workspace has its own features and consistency guarantees.
 | Capacity and performance | A 500 GB deployment, maximum throughput, and latency under representative production load have not been validated. Local functional tests and the completed local soak runs do not establish those capacity or performance limits. |
 | Shared admission | Native write capacity is no longer divided by the hosted-group count. Existing server budgets still apply across connections. A group waiting for quorum can fill that shared capacity and prevent sibling requests from completing; group fairness is not implemented. A disconnected mutation may return `Unknown` and must not be automatically replayed. |
 
-Detailed evidence and remaining scenarios are tracked in
-[progress](docs/progress.md) and the [failure matrix](docs/failure-matrix.md).
-
 ## Packages
 
 | Package | Responsibility | Kind |
@@ -98,7 +95,6 @@ rockbee-raft-kv/
     rockbee-raft-gateway/
     rockbee-raft-node/
   configs/
-  docs/
 ```
 
 The implemented request path is:
@@ -187,8 +183,8 @@ cargo clippy --locked --offline -p rockbee-raft-protocol --all-targets -- -D war
 ```
 
 These checks exercise the implemented protocol without compiling the native
-storage engine. Node integration checks are tracked in the progress record.
-The parent workspace continues to build its own packages independently.
+storage engine. The parent workspace continues to build its own packages
+independently.
 
 The first complete-path test is
 `apps/rockbee-raft-node/tests/runtime.rs`. Run it from this workspace with
@@ -206,8 +202,6 @@ CXXFLAGS="-isystem $(xcrun --sdk macosx --show-sdk-path)/usr/include/c++/v1" \
 
 This supplies build headers; it does not change runtime or durability settings.
 
-The agreed direction and correctness requirements are recorded in
-[the design](docs/design.md). The work completed in this stage is tracked in
-[the workspace plan](docs/workspace-plan.md). The next stages and their acceptance
-tests are in [the implementation plan](docs/implementation-plan.md);
-[progress](docs/progress.md) distinguishes implemented and verified behavior.
+Development plans and detailed verification notes are kept locally outside
+version control. The capability, checkpoint, and limitation sections above
+record the published scope of this workspace.
