@@ -1,0 +1,9 @@
+# Keep Superpowers disabled for the Rockbee workspace.
+[plugins."superpowers@superpowers-dev"]
+enabled = false
+
+[plugins."superpowers@openai-curated"]
+enabled = false
+
+[plugins."superpowers@openai-curated-remote"]
+enabled = false
