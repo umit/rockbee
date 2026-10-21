@@ -1,0 +1,23 @@
+# Shared cluster settings must match on all three initial nodes.
+# Start with --create; restart with --open. Only node 1 uses --initialize.
+mode = "bootstrap"
+cluster_id = "01010101010101010101010101010101"
+node_id = 1
+data_dir = "../data/local/node-1"
+shards = 4
+hash_seed = 0
+
+[[nodes]]
+node_id = 1
+peer_address = "127.0.0.1:7101"
+data_address = "127.0.0.1:8101"
+
+[[nodes]]
+node_id = 2
+peer_address = "127.0.0.1:7102"
+data_address = "127.0.0.1:8102"
+
+[[nodes]]
+node_id = 3
+peer_address = "127.0.0.1:7103"
+data_address = "127.0.0.1:8103"

@@ -2,9 +2,11 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used)]
 
+#[path = "support/config_files.rs"]
+mod config_files;
 #[path = "support/movement_recovery.rs"]
 mod movement_recovery;
-#[path = "support/soak.rs"]
+#[path = "support/soak/mod.rs"]
 mod soak;
 #[path = "support/storage_lock.rs"]
 mod storage_lock;
@@ -106,6 +108,7 @@ struct ProcessCluster {
     directory: ClusterDirectory,
     root: tempfile::TempDir,
     report_dir: Option<PathBuf>,
+    server_budget_mib: u64,
 }
 
 impl ProcessCluster {
@@ -114,6 +117,10 @@ impl ProcessCluster {
     }
 
     fn start_with_report(report_dir: Option<PathBuf>) -> Self {
+        Self::start_with_server_budget(report_dir, 64)
+    }
+
+    fn start_with_server_budget(report_dir: Option<PathBuf>, server_budget_mib: u64) -> Self {
         let mut reservations = Vec::new();
         let mut nodes = Vec::new();
         for id in 1..=3 {
@@ -137,6 +144,7 @@ impl ProcessCluster {
             directory,
             root: tempfile::tempdir().unwrap(),
             report_dir,
+            server_budget_mib,
         };
         // CLI processes bind themselves. Release only these owned reservations;
         // an unrelated bind race makes startup fail, never kills that process.
@@ -148,8 +156,13 @@ impl ProcessCluster {
     fn spawn_nodes(&mut self, mode: &str) {
         // Start the logical initializer last; readiness still waits for quorum.
         for id in [2, 3, 1] {
-            self.nodes
-                .push(spawn_node(self.root.path(), &self.directory, id, mode));
+            self.nodes.push(spawn_node(
+                self.root.path(),
+                &self.directory,
+                id,
+                mode,
+                self.server_budget_mib,
+            ));
         }
     }
 
@@ -287,7 +300,13 @@ impl Drop for ProcessCluster {
     }
 }
 
-fn spawn_node(root: &Path, directory: &ClusterDirectory, id: u64, mode: &str) -> OwnedNode {
+fn spawn_node(
+    root: &Path,
+    directory: &ClusterDirectory,
+    id: u64,
+    mode: &str,
+    server_budget_mib: u64,
+) -> OwnedNode {
     let log_path = root.join(format!("node-{id}.log"));
     let log = OpenOptions::new()
         .create(true)
@@ -309,6 +328,10 @@ fn spawn_node(root: &Path, directory: &ClusterDirectory, id: u64, mode: &str) ->
         .arg("--data-dir")
         .arg(root.join(format!("node-{id}")))
         .arg(mode)
+        .arg("--server-request-mib")
+        .arg(server_budget_mib.to_string())
+        .arg("--server-response-mib")
+        .arg(server_budget_mib.to_string())
         .stdin(Stdio::null())
         .stdout(log.try_clone().unwrap())
         .stderr(log);

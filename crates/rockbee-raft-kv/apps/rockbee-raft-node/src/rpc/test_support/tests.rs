@@ -19,7 +19,7 @@ use tokio::{
 use super::PeerRelays;
 use crate::rpc::{
     PeerIdentity, PeerLimits, PeerResources, PeerServer,
-    message::{
+    wire::message::{
         PEER_HEADER_BYTES, PeerHeader, PeerKind, PeerRequest, PeerRequestBody, encode_request,
     },
 };

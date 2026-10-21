@@ -10,9 +10,9 @@ pub(in crate::cluster) struct MoveRunners {
     pub(super) tasks: Mutex<BTreeMap<GroupId, RunningMove>>,
     pub(super) active: Arc<Semaphore>,
     #[cfg(test)]
-    pub(super) before_source_learner: Mutex<Option<Arc<stale_source::SourcePause>>>,
+    pub(super) before_source_learner: Mutex<Option<Arc<tests::stale_source::SourcePause>>>,
     #[cfg(test)]
-    pub(super) native_learner: Mutex<Option<Arc<stale_source::NativeLearnerObservation>>>,
+    pub(super) native_learner: Mutex<Option<Arc<tests::stale_source::NativeLearnerObservation>>>,
     // Separate pool avoids runner -> colocated metadata publication deadlock.
     pub(super) publication: Arc<Semaphore>,
     pub(super) stopping: AtomicBool,
@@ -22,9 +22,9 @@ pub(in crate::cluster) struct MoveRunners {
     pub(super) before_publication: Mutex<Option<Arc<TestPause>>>,
     #[cfg(test)]
     pub(super) native_membership:
-        Mutex<Option<Arc<native_membership_observation::NativeMembershipObservation>>>,
+        Mutex<Option<Arc<tests::native_membership_observation::NativeMembershipObservation>>>,
     #[cfg(test)]
-    pub(super) handoff_seal: Mutex<Option<Arc<handoff_tests::SealObservation>>>,
+    pub(super) handoff_seal: Mutex<Option<Arc<tests::handoff::SealObservation>>>,
 }
 
 impl MoveRunners {

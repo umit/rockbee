@@ -9,11 +9,9 @@ use rockbee_raft_protocol::{
 };
 
 use super::{
+    command::HandoffProof,
     encoding::check_size,
-    model::{
-        HandoffProof, MAX_DIRECTORY_BYTES, MAX_JOB_BYTES, MetadataError, MetadataView,
-        SuccessorState,
-    },
+    state::{MAX_DIRECTORY_BYTES, MAX_JOB_BYTES, MetadataError, MetadataView, SuccessorState},
 };
 
 pub(super) fn validate_view(view: &MetadataView) -> Result<(), MetadataError> {

@@ -1,0 +1,24 @@
+# Starts a separate data node. An explicit replica move must add it to a group.
+mode = "join"
+cluster_id = "01010101010101010101010101010101"
+data_dir = "../data/local/node-4"
+shards = 4
+hash_seed = 0
+startup_timeout_ms = 10000
+
+[local_node]
+node_id = 4
+peer_address = "127.0.0.1:7104"
+data_address = "127.0.0.1:8104"
+
+[[seeds]]
+node_id = 1
+address = "127.0.0.1:8101"
+
+[[seeds]]
+node_id = 2
+address = "127.0.0.1:8102"
+
+[[seeds]]
+node_id = 3
+address = "127.0.0.1:8103"

@@ -3,6 +3,10 @@
 An independent Rust workspace inside the Rockbee repository for a developing
 Multi-Raft key-value database using OpenRaft, RocksDB, and a dedicated gateway.
 
+**Inspired by Meta's ZippyDB architecture.** Rockbee explores this direction with
+shard-aware gateway routing, independent OpenRaft groups, and RocksDB-backed
+storage nodes.
+
 Location in the repository: `crates/rockbee-raft-kv/`.
 
 **Status: a working distributed KV foundation, verified locally.** The public
@@ -69,6 +73,7 @@ workspace has its own features and consistency guarantees.
 | Storage | RocksDB requires local disk on the storage nodes. This workspace does not provide a diskless or S3-backed durable storage engine. |
 | Production readiness | TLS/authentication and complete operational tooling are not implemented. Broader network-partition and disk-failure coverage, plus long-running soak and resource validation, remain incomplete. Existing logs, client counters, and local recovery tests cover only part of this work. |
 | Capacity and performance | A 500 GB deployment, maximum throughput, and latency under representative production load have not been validated. Local functional tests and the completed local soak runs do not establish those capacity or performance limits. |
+| Shared admission | Native write capacity is no longer divided by the hosted-group count. Existing server budgets still apply across connections. A group waiting for quorum can fill that shared capacity and prevent sibling requests from completing; group fairness is not implemented. A disconnected mutation may return `Unknown` and must not be automatically replayed. |
 
 Detailed evidence and remaining scenarios are tracked in
 [progress](docs/progress.md) and the [failure matrix](docs/failure-matrix.md).
@@ -168,6 +173,10 @@ env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info
 ```
 
 ## Local checks
+
+For a local cluster, use the [TOML configuration guide](configs/README.md).
+It includes files for three nodes and a gateway, plus explicit create, restart,
+and fourth-node join commands. Existing inline CLI settings remain supported.
 
 Run from this directory:
 

@@ -1,26 +1,24 @@
 //! Thin process boundary for the Rockbee Raft gateway library.
 
-use std::{net::SocketAddr, process::ExitCode, time::Duration};
+use std::process::ExitCode;
 
-use rockbee_raft_gateway::{GatewayConfig, GatewayRuntime, SeedNode};
-use rockbee_raft_protocol::{
-    ClusterId, NodeId, ShardConfig,
-    transport::{LinkConfig, server::ServerConfig},
-};
+use rockbee_raft_gateway::GatewayRuntime;
+
+mod cli;
 
 #[tokio::main]
 async fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_micros()
         .init();
-    let config = match arguments(std::env::args().skip(1)) {
+    let config = match cli::arguments(std::env::args().skip(1)) {
         Ok(Some(config)) => config,
         Ok(None) => {
-            println!("{}", usage());
+            println!("{}", cli::USAGE);
             return ExitCode::SUCCESS;
         }
         Err(error) => {
-            eprintln!("{error}\n\n{}", usage());
+            eprintln!("{error}\n\n{}", cli::USAGE);
             return ExitCode::FAILURE;
         }
     };
@@ -48,97 +46,6 @@ async fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
-}
-
-fn arguments(mut values: impl Iterator<Item = String>) -> Result<Option<GatewayConfig>, String> {
-    let mut listen = None;
-    let mut cluster_id = None;
-    let mut seeds = Vec::new();
-    let mut shards = 4;
-    let mut hash_seed = 0;
-    while let Some(flag) = values.next() {
-        match flag.as_str() {
-            "--help" | "-h" => return Ok(None),
-            "--listen" => {
-                listen = Some(
-                    parse_value(&mut values, "--listen")?
-                        .parse()
-                        .map_err(|_| "--listen must be host:port")?,
-                )
-            }
-            "--cluster-id" => {
-                cluster_id = Some(parse_cluster_id(&parse_value(
-                    &mut values,
-                    "--cluster-id",
-                )?)?)
-            }
-            "--seed" => seeds.push(parse_seed(&parse_value(&mut values, "--seed")?)?),
-            "--shards" => {
-                shards = parse_value(&mut values, "--shards")?
-                    .parse()
-                    .map_err(|_| "--shards must be an integer")?
-            }
-            "--hash-seed" => {
-                hash_seed = parse_value(&mut values, "--hash-seed")?
-                    .parse()
-                    .map_err(|_| "--hash-seed must be an unsigned integer")?
-            }
-            unexpected => return Err(format!("unknown argument: {unexpected}")),
-        }
-    }
-    Ok(Some(GatewayConfig {
-        cluster_id: cluster_id.ok_or("--cluster-id is required")?,
-        expected_shard_config: ShardConfig::new(shards, hash_seed)
-            .map_err(|error| error.to_string())?,
-        seeds,
-        listen_address: listen.ok_or("--listen is required")?,
-        backend_link: LinkConfig::default(),
-        server: ServerConfig::default(),
-        startup_timeout: Duration::from_secs(5),
-    }))
-}
-
-fn parse_value(values: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
-    values.next().ok_or_else(|| format!("{flag} needs a value"))
-}
-
-fn parse_seed(value: &str) -> Result<SeedNode, String> {
-    let (id, address) = value
-        .split_once('@')
-        .ok_or("--seed must be node-id@host:port")?;
-    Ok(SeedNode {
-        node_id: NodeId::new(
-            id.parse()
-                .map_err(|_| "seed node ID must be an unsigned integer")?,
-        )
-        .map_err(|error| error.to_string())?,
-        address: address
-            .parse::<SocketAddr>()
-            .map_err(|_| "seed address must be host:port")?,
-    })
-}
-
-fn parse_cluster_id(value: &str) -> Result<ClusterId, String> {
-    let input = value.as_bytes();
-    if input.len() != 32 || !input.iter().all(u8::is_ascii_hexdigit) {
-        return Err("--cluster-id must be exactly 32 hexadecimal characters".to_owned());
-    }
-    let mut bytes = [0; 16];
-    for (index, output) in bytes.iter_mut().enumerate() {
-        let high = hex_digit(input[index * 2]).ok_or("--cluster-id must be hexadecimal")?;
-        let low = hex_digit(input[index * 2 + 1]).ok_or("--cluster-id must be hexadecimal")?;
-        *output = (high << 4) | low;
-    }
-    ClusterId::new(bytes).map_err(|error| error.to_string())
-}
-
-const fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 #[cfg(unix)]
@@ -179,10 +86,277 @@ impl Shutdown {
     }
 }
 
-fn usage() -> &'static str {
-    "Usage: rockbee-raft-gateway --listen HOST:PORT --cluster-id 32_HEX\n\
-  --seed NODE_ID@HOST:PORT [--seed NODE_ID@HOST:PORT ...]\n\
-  [--shards COUNT] [--hash-seed SEED]\n\n\
-Starts only after a backend node returns and validates the replicated metadata directory.\n\
-Seeds are bootstrap addresses, not trusted routing state."
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic, clippy::unwrap_used)]
+
+    use std::io::Write;
+
+    use rockbee_raft_protocol::ClusterId;
+
+    use super::*;
+
+    const VALID_CONFIG: &str = r#"
+cluster_id = "01010101010101010101010101010101"
+listen = "127.0.0.1:9100"
+
+[[seeds]]
+node_id = 1
+address = "127.0.0.1:8101"
+
+[[seeds]]
+node_id = 2
+address = "127.0.0.1:8102"
+"#;
+
+    fn temporary_config(contents: &str) -> tempfile::NamedTempFile {
+        let mut file = tempfile::Builder::new()
+            .prefix("rockbee-raft-gateway-config-")
+            .suffix(".toml")
+            .tempfile()
+            .expect("create temporary config");
+        file.write_all(contents.as_bytes())
+            .expect("write temporary config");
+        file
+    }
+
+    fn config_arguments(path: &std::path::Path) -> std::vec::IntoIter<String> {
+        vec!["--config".into(), path.display().to_string()].into_iter()
+    }
+
+    fn assert_config_error(contents: &str, expected: &str) {
+        let file = temporary_config(contents);
+        let error =
+            cli::arguments(config_arguments(file.path())).expect_err("config must be rejected");
+        assert!(error.contains(&file.path().display().to_string()));
+        assert!(error.contains(expected), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn parses_a_valid_toml_config_file() {
+        let file = temporary_config(VALID_CONFIG);
+        let config = cli::arguments(config_arguments(file.path()))
+            .expect("valid config")
+            .expect("start request");
+
+        assert_eq!(config.cluster_id, ClusterId::new([1; 16]).unwrap());
+        assert_eq!(config.listen_address, "127.0.0.1:9100".parse().unwrap());
+        assert_eq!(config.expected_shard_config.count(), 4);
+        assert_eq!(config.expected_shard_config.seed(), 0);
+        assert_eq!(config.seeds.len(), 2);
+        assert_eq!(config.seeds[0].node_id.get(), 1);
+        assert_eq!(config.seeds[1].address, "127.0.0.1:8102".parse().unwrap());
+    }
+
+    #[test]
+    fn rejects_invalid_or_missing_toml_identity() {
+        assert_config_error(
+            VALID_CONFIG
+                .replace("01010101010101010101010101010101", "not-a-cluster-id")
+                .as_str(),
+            "cluster_id",
+        );
+        assert_config_error(
+            VALID_CONFIG
+                .replacen("cluster_id = \"01010101010101010101010101010101\"\n", "", 1)
+                .as_str(),
+            "cluster_id",
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_and_duplicate_toml_fields() {
+        assert_config_error(format!("extra = true\n{VALID_CONFIG}").as_str(), "unknown");
+        assert_config_error(
+            VALID_CONFIG
+                .replacen(
+                    "address = \"127.0.0.1:8101\"",
+                    "address = \"127.0.0.1:8101\"\nextra = true",
+                    1,
+                )
+                .as_str(),
+            "unknown",
+        );
+        assert_config_error(
+            VALID_CONFIG
+                .replacen(
+                    "listen = \"127.0.0.1:9100\"",
+                    "listen = \"127.0.0.1:9100\"\nlisten = \"127.0.0.1:9200\"",
+                    1,
+                )
+                .as_str(),
+            "duplicate",
+        );
+    }
+
+    #[test]
+    fn rejects_config_mixed_with_runtime_flags_and_missing_files() {
+        let file = temporary_config(VALID_CONFIG);
+        for values in [
+            vec![
+                "--config".to_owned(),
+                file.path().display().to_string(),
+                "--listen".to_owned(),
+                "127.0.0.1:9200".to_owned(),
+            ],
+            vec![
+                "--listen".to_owned(),
+                "127.0.0.1:9200".to_owned(),
+                "--config".to_owned(),
+                file.path().display().to_string(),
+            ],
+        ] {
+            let mixed = cli::arguments(values.into_iter())
+                .expect_err("config and runtime arguments conflict");
+            assert!(mixed.contains("--config"));
+            assert!(mixed.contains("--listen"));
+        }
+        let repeated = cli::arguments(
+            [
+                "--config".to_owned(),
+                file.path().display().to_string(),
+                "--config".to_owned(),
+                file.path().display().to_string(),
+            ]
+            .into_iter(),
+        )
+        .expect_err("repeated config must be rejected");
+        assert!(repeated.contains("only once"));
+
+        let missing = tempfile::Builder::new()
+            .prefix("rockbee-raft-gateway-missing-config-")
+            .suffix(".toml")
+            .tempfile()
+            .expect("reserve missing config path")
+            .into_temp_path();
+        let missing_path = missing.to_path_buf();
+        missing.close().expect("remove reserved config path");
+        let error = cli::arguments(config_arguments(&missing_path))
+            .expect_err("missing file must be rejected");
+        assert!(error.contains(&missing_path.display().to_string()));
+    }
+
+    #[test]
+    fn rejects_toml_configs_that_fail_gateway_validation() {
+        assert_config_error(
+            VALID_CONFIG
+                .replace("127.0.0.1:9100", "0.0.0.0:9100")
+                .as_str(),
+            "gateway listener address",
+        );
+        assert_config_error(
+            VALID_CONFIG
+                .replacen("node_id = 2", "node_id = 1", 1)
+                .as_str(),
+            "unique seed",
+        );
+        assert_config_error(
+            "cluster_id = \"01010101010101010101010101010101\"\nlisten = \"127.0.0.1:9100\"\nseeds = []\n",
+            "unique seed",
+        );
+    }
+
+    #[test]
+    fn keeps_inline_arguments_and_the_shipped_gateway_example_usable() {
+        let inline = cli::arguments(
+            [
+                "--cluster-id",
+                "01010101010101010101010101010101",
+                "--listen",
+                "127.0.0.1:9100",
+                "--seed",
+                "1@127.0.0.1:8101",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("valid inline arguments")
+        .expect("start request");
+        assert_eq!(inline.seeds[0].node_id.get(), 1);
+
+        let example =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../configs/gateway.toml");
+        let config = cli::arguments(config_arguments(&example))
+            .expect("valid shipped config")
+            .expect("start request");
+        assert_eq!(config.seeds.len(), 3);
+        assert_eq!(config.seeds[2].address.port(), 8103);
+    }
+
+    #[test]
+    fn inline_server_overrides_configure_gateway_admission_limits() {
+        let config = cli::arguments(
+            [
+                "--cluster-id",
+                "01010101010101010101010101010101",
+                "--listen",
+                "127.0.0.1:9100",
+                "--seed",
+                "1@127.0.0.1:8101",
+                "--server-request-mib",
+                "512",
+                "--server-response-mib",
+                "256",
+                "--max-connections",
+                "96",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .expect("valid inline arguments")
+        .expect("start request");
+
+        assert_eq!(config.server.request_bytes, 512 * 1024 * 1024);
+        assert_eq!(config.server.response_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.server.max_connections, 96);
+    }
+
+    #[test]
+    fn inline_server_overrides_reject_malformed_values() {
+        for (flag, value, expected) in [
+            (
+                "--server-request-mib",
+                "large",
+                "--server-request-mib must be an unsigned MiB value",
+            ),
+            (
+                "--server-response-mib",
+                &usize::MAX.to_string(),
+                "--server-response-mib MiB value overflows byte budget",
+            ),
+            (
+                "--max-connections",
+                "0",
+                "server count limits must be nonzero",
+            ),
+        ] {
+            let error = cli::arguments(
+                [
+                    "--cluster-id".to_owned(),
+                    "01010101010101010101010101010101".to_owned(),
+                    "--listen".to_owned(),
+                    "127.0.0.1:9100".to_owned(),
+                    "--seed".to_owned(),
+                    "1@127.0.0.1:8101".to_owned(),
+                    flag.to_owned(),
+                    value.to_owned(),
+                ]
+                .into_iter(),
+            )
+            .expect_err("malformed server override must be rejected");
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn omits_toml_source_contents_from_parse_errors() {
+        let file = temporary_config("sentinel-secret = [");
+        let error = cli::arguments(config_arguments(file.path()))
+            .expect_err("malformed config must be rejected");
+        assert!(error.contains(&file.path().display().to_string()));
+        assert!(
+            !error.contains("sentinel-secret"),
+            "error leaked config source: {error}"
+        );
+    }
 }

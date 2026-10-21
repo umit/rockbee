@@ -16,9 +16,12 @@ rockbee-raft-protocol.workspace = true
 bytes.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 rockbee-raft-client = { path = "../../crates/rockbee-raft-client" }
+tempfile.workspace = true
 
 [lints]
 workspace = true

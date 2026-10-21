@@ -31,7 +31,7 @@ impl NodeService {
         match topology(&observed, &intent)? {
             Topology::Source => {
                 #[cfg(test)]
-                stale_source::pause_source(self, &intent, &observed).await;
+                tests::stale_source::pause_source(self, &intent, &observed).await;
                 self.ensure_learner(group, &intent, &observed, deadline)
                     .await?;
                 let caught_up_vote = self.wait_for_catchup(group, &intent, deadline).await?;
@@ -121,7 +121,7 @@ impl NodeService {
             .as_ref()
             .and_then(|observer| {
                 observer.enter(
-                    stale_source::SourceIdentity {
+                    tests::stale_source::SourceIdentity {
                         node: self.identity.node_id,
                         group: intent.data_group,
                         job: intent.job_id,
@@ -265,12 +265,14 @@ impl NodeService {
             .expect("native observation slot poisoned")
             .as_ref()
             .and_then(|observer| {
-                observer.enter(native_membership_observation::NativeMembershipIdentity {
-                    node: self.identity.node_id,
-                    group: intent.data_group,
-                    job: intent.job_id,
-                    target: target.clone(),
-                })
+                observer.enter(
+                    tests::native_membership_observation::NativeMembershipIdentity {
+                        node: self.identity.node_id,
+                        group: intent.data_group,
+                        job: intent.job_id,
+                        target: target.clone(),
+                    },
+                )
             });
         let result = group.raft.change_membership(target, false).await;
         #[cfg(test)]

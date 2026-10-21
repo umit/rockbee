@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use rockbee_raft_protocol::{GroupId, NodeId};
 
 use super::relay::Shared;
-use crate::rpc::{PeerError, message::PeerHeader};
+use crate::rpc::{PeerError, wire::message::PeerHeader};
 
 #[derive(Clone)]
 pub(crate) struct DispatchTracker {

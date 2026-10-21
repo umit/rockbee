@@ -21,16 +21,53 @@ Client -> Gateway -> NodeService -> OpenRaft group -> RocksDB adapter
 | File | Responsibility | Familiar Java comparison |
 | --- | --- | --- |
 | [main.rs](src/main.rs) | Process startup and shutdown | Application entry point |
-| [cli.rs](src/cli.rs) | Parse process arguments | Command-line options |
+| [cli/mod.rs](src/cli/mod.rs) | Parse process arguments and load TOML files | Command-line options |
 | [config/mod.rs](src/config/mod.rs) | Validate one node's settings | Configuration object |
-| [cluster/mod.rs](src/cluster/mod.rs) | Own the database, listeners and Raft groups | Lifecycle/composition root |
-| [cluster/service.rs](src/cluster/service.rs) | Route KV operations through consensus/read authority | Application service |
-| [cluster/bootstrap.rs](src/cluster/bootstrap.rs) | Publish the initial immutable directory | Startup orchestration |
+| [cluster/runtime/mod.rs](src/cluster/runtime/mod.rs) | Own the database, listeners and Raft groups | Lifecycle/composition root |
+| [cluster/service/mod.rs](src/cluster/service/mod.rs) | Route KV operations through consensus/read authority | Application service |
+| [cluster/membership/](src/cluster/membership/mod.rs) | Bootstrap the directory and discover an existing cluster | Startup orchestration |
+| [cluster/movement/](src/cluster/movement/mod.rs) | Execute replica-movement steps and observations | Workflow service |
+| [control/mod.rs](src/control/mod.rs) | Define metadata commands and deterministic state transitions | Domain model |
 | [raft/types.rs](src/raft/types.rs) | Define commands and OpenRaft associated types | Request types and interface type parameters |
-| [storage/log.rs](src/storage/log.rs) | Persist votes and Raft log entries | Durable log repository |
-| [storage/state.rs](src/storage/state.rs) | Apply committed commands to RocksDB | State-machine persistence |
-| [rpc/network.rs](src/rpc/network.rs) | Implement OpenRaft's network traits | Outbound transport adapter |
-| [rpc/server.rs](src/rpc/server.rs) | Deliver peer messages to OpenRaft | Inbound transport adapter |
+| [storage/rocksdb/engine/](src/storage/rocksdb/engine/mod.rs) | Open RocksDB and schedule bounded native I/O | Database connection and I/O executor |
+| [storage/rocksdb/raft/log.rs](src/storage/rocksdb/raft/log.rs) | Persist votes and Raft log entries | Durable log repository |
+| [storage/rocksdb/raft/state.rs](src/storage/rocksdb/raft/state.rs) | Apply committed commands to RocksDB | State-machine persistence |
+| [rpc/transport/client.rs](src/rpc/transport/client.rs) | Implement OpenRaft's network traits | Outbound transport adapter |
+| [rpc/transport/server.rs](src/rpc/transport/server.rs) | Deliver peer messages to OpenRaft | Inbound transport adapter |
+| [rpc/wire/](src/rpc/wire/mod.rs) | Bound and encode peer frames and DTOs | Network message format |
+
+The [storage walkthrough](src/storage/README.md) follows database creation,
+group ownership, PUT/GET/DELETE, durable writes and snapshots step by step.
+
+## Package layout
+
+```text
+src/
+  main.rs                 process entry point and shutdown
+  cli/                    arguments, TOML input and parser tests
+  config/                 node, join, resolved startup and validation
+  cluster/
+    runtime/              resource ownership and lifecycle
+    service/              gateway-facing request handling and admission
+    membership/           bootstrap and join discovery
+    movement/             replica-movement execution and its tests
+    tests/                group isolation and public response-loss tests
+  control/                metadata commands, state and validation
+  raft/                   OpenRaft type configuration and payloads
+  rpc/
+    wire/                 peer encoding and framing
+    transport/            outgoing client and incoming server
+    test_support/         owned relays and dispatch observations
+  storage/
+    rocksdb/              engine, Raft adapters, control, snapshot, format
+  diagnostics/            opt-in incident evidence
+tests/                    Cargo integration tests and process support
+```
+
+These are Rust modules inside one Cargo package. The `mod.rs` files introduce
+their module and expose its API; they do not create extra objects, threads or
+network hops. Public paths such as `rockbee_raft_node::storage::Storage` stay
+stable while implementation files move underneath them.
 
 These comparisons explain responsibilities, not inheritance. Rust `impl` blocks
 define methods; traits describe capabilities required by OpenRaft. The
@@ -62,9 +99,10 @@ full log identities, and shutdown ownership. Multi-Raft also needs one registry
 of independent groups sharing the process's database and resource budgets.
 
 The private wire DTOs bound collection decoding before allocation. They are a
-transport boundary, not a second Raft model. `storage/mod.rs` contains shared
-database ownership and write-batch bookkeeping; it is the next readability
-candidate after the working path is stable.
+transport boundary, not a second Raft model. `storage/mod.rs` exposes the storage
+API, `storage/rocksdb/mod.rs` owns the group registry, and `storage/rocksdb/engine`
+owns the native database and blocking I/O. The adapters describe what to persist;
+OpenRaft decides which log entries are committed.
 
 ## Current verification boundary
 
@@ -80,6 +118,7 @@ and verifies the value through a new gateway/client. It then deletes the value
 and verifies that every node exits successfully on SIGTERM. The gateway runs
 inside that test process. See [process recovery tests](tests/processes.rs).
 
-Durable snapshot publication/installation and fourth-node movement
-are unfinished. The initial directory remains immutable; changing membership
-requires the later metadata transition protocol.
+Snapshot and first replica-movement scenarios have dedicated suites alongside
+their implementation. See the workspace's [capabilities and current limits](../../README.md)
+for the distinction between verified first movement and unfinished repeated
+movement coordination.

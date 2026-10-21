@@ -8,7 +8,7 @@ use tokio::{
     time::Instant,
 };
 
-use super::{PeerError, PeerIdentity};
+use crate::rpc::{PeerError, PeerIdentity};
 
 const CONTROL_IDLE_CONNECTION_TTL: Duration = Duration::from_secs(5);
 

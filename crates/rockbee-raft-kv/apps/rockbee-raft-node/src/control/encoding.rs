@@ -2,10 +2,13 @@
 use rockbee_raft_protocol::{GroupId, control::MoveRecord, routing::ClusterDirectory};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use super::model::{
-    AcceptedSuccessor, DIRECTORY_KEY, JOB_KEY_PREFIX, MAX_DIRECTORY_BYTES, MAX_JOB_BYTES,
-    MAX_STORED_MOVES_BYTES, METADATA_EFFECT_RESERVATION, MetadataEffect, MetadataError, ORIGIN_KEY,
-    PreparingSuccessor, StoredMoves, SuccessorState,
+use super::{
+    command::PreparingSuccessor,
+    state::{
+        AcceptedSuccessor, DIRECTORY_KEY, JOB_KEY_PREFIX, MAX_DIRECTORY_BYTES, MAX_JOB_BYTES,
+        MAX_STORED_MOVES_BYTES, METADATA_EFFECT_RESERVATION, MetadataEffect, MetadataError,
+        ORIGIN_KEY, StoredMoves, SuccessorState,
+    },
 };
 
 /// Conservative per-effect allowance for generation prefix and native put
@@ -154,7 +157,7 @@ fn encode_effects(plans: &[PlannedEffect<'_>]) -> Result<Vec<MetadataEffect>, Me
         .map(|plan| match plan {
             PlannedEffect::Stored { group, moves } => Ok(MetadataEffect {
                 key: job_key(*group),
-                value: super::model::encode_stored_moves(moves)?,
+                value: super::state::encode_stored_moves(moves)?,
             }),
             PlannedEffect::Directory { key, directory } => Ok(MetadataEffect {
                 key: key.to_vec(),

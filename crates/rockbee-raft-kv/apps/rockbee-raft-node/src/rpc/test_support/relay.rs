@@ -15,9 +15,9 @@ use tokio::{
     time::timeout,
 };
 
-use super::super::{
+use crate::rpc::{
     PeerIdentity, PeerLimits,
-    message::{PEER_HEADER_BYTES, PeerHeader},
+    wire::message::{PEER_HEADER_BYTES, PeerHeader},
 };
 
 #[derive(Debug)]

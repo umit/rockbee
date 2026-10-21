@@ -1,0 +1,17 @@
+# Gateway listener and bootstrap data endpoints for a three-node local cluster.
+cluster_id = "01010101010101010101010101010101"
+listen = "127.0.0.1:9100"
+shards = 4
+hash_seed = 0
+
+[[seeds]]
+node_id = 1
+address = "127.0.0.1:8101"
+
+[[seeds]]
+node_id = 2
+address = "127.0.0.1:8102"
+
+[[seeds]]
+node_id = 3
+address = "127.0.0.1:8103"
