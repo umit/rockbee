@@ -130,6 +130,11 @@ pub(crate) enum WireCommand {
         key: BoundedVec<u8, 65536>,
     },
     Metadata(Box<crate::control::MetadataCommand>),
+    HandoffFence {
+        predecessor_revision: u64,
+        predecessor_job_id: rockbee_raft_protocol::control::MoveJobId,
+        successor_job_id: rockbee_raft_protocol::control::MoveJobId,
+    },
 }
 impl From<&Command> for WireCommand {
     fn from(value: &Command) -> Self {
@@ -142,6 +147,15 @@ impl From<&Command> for WireCommand {
                 key: BoundedVec(key.to_vec()),
             },
             Command::Metadata(command) => Self::Metadata(command.clone()),
+            Command::HandoffFence {
+                predecessor_revision,
+                predecessor_job_id,
+                successor_job_id,
+            } => Self::HandoffFence {
+                predecessor_revision: *predecessor_revision,
+                predecessor_job_id: *predecessor_job_id,
+                successor_job_id: *successor_job_id,
+            },
         }
     }
 }
@@ -157,6 +171,15 @@ impl TryFrom<WireCommand> for Command {
                 key: Bytes::from(key.0),
             },
             WireCommand::Metadata(command) => Command::Metadata(command),
+            WireCommand::HandoffFence {
+                predecessor_revision,
+                predecessor_job_id,
+                successor_job_id,
+            } => Command::HandoffFence {
+                predecessor_revision,
+                predecessor_job_id,
+                successor_job_id,
+            },
         };
         command
             .validate()
@@ -425,6 +448,114 @@ mod tests {
     };
 
     use super::{BoundedVec, WireAppend, WireCommand, WireSnapshot, WireVoteRequest};
+
+    #[test]
+    fn handoff_fence_wire_command_roundtrips_full_width_fields() {
+        use crate::types::Command;
+        use rockbee_raft_protocol::control::MoveJobId;
+
+        let command = Command::HandoffFence {
+            predecessor_revision: u64::MAX,
+            predecessor_job_id: MoveJobId::new([255; 16]).expect("predecessor"),
+            successor_job_id: MoveJobId::new([254; 16]).expect("successor"),
+        };
+        let bytes = postcard::to_stdvec(&WireCommand::from(&command)).expect("encode wire fence");
+        // Appended tag three, full-width u64 varint, two fixed arrays without lengths.
+        let mut expected = vec![3];
+        expected.extend_from_slice(&[255; 9]);
+        expected.push(1);
+        expected.extend_from_slice(&[255; 16]);
+        expected.extend_from_slice(&[254; 16]);
+        assert_eq!(bytes, expected);
+        let wire: WireCommand = postcard::from_bytes(&bytes).expect("decode wire fence");
+        assert_eq!(Command::try_from(wire).expect("validated command"), command);
+    }
+
+    #[test]
+    fn handoff_fence_wire_conversion_rejects_zero_revision_and_same_job() {
+        use crate::types::Command;
+        use rockbee_raft_protocol::control::MoveJobId;
+
+        let first = MoveJobId::new([1; 16]).expect("predecessor");
+        let next = MoveJobId::new([2; 16]).expect("successor");
+        for (revision, successor) in [(0, next), (1, first)] {
+            let invalid = WireCommand::HandoffFence {
+                predecessor_revision: revision,
+                predecessor_job_id: first,
+                successor_job_id: successor,
+            };
+            // Intrinsic validation belongs to conversion, after bounded wire decode.
+            let bytes = postcard::to_stdvec(&invalid).expect("encode invalid fixture");
+            let decoded = postcard::from_bytes::<WireCommand>(&bytes).expect("bounded wire shape");
+            assert!(Command::try_from(decoded).is_err());
+        }
+    }
+
+    #[test]
+    fn handoff_append_preserves_historical_put_delete_and_metadata_wire_bytes() {
+        use crate::{
+            control::{MembershipObservation, MetadataCommand},
+            types::Command,
+        };
+        use rockbee_raft_protocol::{
+            GroupId, NodeId,
+            control::{CommittedLogPosition, MoveJobId},
+            routing::NodeEndpoint,
+        };
+
+        let metadata = Command::Metadata(Box::new(MetadataCommand::CompleteMove {
+            expected_directory_revision: 1,
+            data_group: GroupId::new(1),
+            job_id: MoveJobId::new([1; 16]).expect("job"),
+            observation: MembershipObservation {
+                uniform: true,
+                voters: [1, 2, 3].map(|id| NodeId::new(id).expect("voter")),
+                replacement_endpoint: NodeEndpoint {
+                    node_id: NodeId::new(4).expect("replacement"),
+                    peer_address: "127.0.0.1:1".parse().expect("peer"),
+                    data_address: "127.0.0.1:2".parse().expect("data"),
+                },
+                membership: CommittedLogPosition {
+                    term: 1,
+                    leader_node_id: NodeId::new(1).expect("leader"),
+                    index: 1,
+                },
+            },
+        }));
+        // Frozen pre-fence tags: Wire Metadata=2, CompleteMove=2. All scalar
+        // values fit one byte; SocketAddr V4 tag=0 precedes its four octets/port.
+        let mut metadata_bytes = vec![2, 2, 1, 1];
+        metadata_bytes.extend_from_slice(&[1; 16]);
+        metadata_bytes.extend_from_slice(&[
+            1, 1, 2, 3, 4, 0, 127, 0, 0, 1, 1, 0, 127, 0, 0, 1, 2, 1, 1, 1,
+        ]);
+        for (command, historical) in [
+            (
+                Command::Put {
+                    key: bytes::Bytes::from_static(b"k"),
+                    value: bytes::Bytes::from_static(b"v"),
+                },
+                vec![0, 1, b'k', 1, b'v'],
+            ),
+            (
+                Command::Delete {
+                    key: bytes::Bytes::from_static(b"k"),
+                },
+                vec![1, 1, b'k'],
+            ),
+            (metadata, metadata_bytes),
+        ] {
+            assert_eq!(
+                postcard::to_stdvec(&WireCommand::from(&command)).expect("wire encode"),
+                historical
+            );
+            let wire = postcard::from_bytes::<WireCommand>(&historical).expect("historical decode");
+            assert_eq!(
+                Command::try_from(wire).expect("historical command"),
+                command
+            );
+        }
+    }
 
     #[test]
     fn metadata_nested_directory_counts_and_intrinsic_shape_are_rejected() {

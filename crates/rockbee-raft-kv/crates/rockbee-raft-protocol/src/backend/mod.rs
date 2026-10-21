@@ -2,8 +2,13 @@
 //!
 //! A cached leader hint is only a routing suggestion. The destination still
 //! checks its authority before reading and classifies writes by submission.
+mod handoff;
 mod movement;
+pub use handoff::{HandoffFenceReceipt, PreparedMoveState, PreparingSuccessor, SealReceipt};
 pub use movement::{AppliedMembership, MoveState, ObservedLogPosition, ReconcileStatus};
+
+#[cfg(test)]
+mod tests;
 
 use std::num::NonZeroU64;
 
@@ -90,6 +95,33 @@ pub enum BackendOperation {
         /// Retained immutable job identity, never an observation witness.
         job_id: MoveJobId,
     },
+    /// Reads the frozen predecessor and preparing-successor handoff state.
+    GetPreparedMove {
+        /// Data group whose retained handoff state is requested.
+        data_group: GroupId,
+    },
+    /// Seals the predecessor at one exact executor before the handoff fence.
+    SealPredecessor {
+        /// Data group whose predecessor is sealed.
+        data_group: GroupId,
+        /// Directory revision retained by the predecessor move.
+        predecessor_revision: u64,
+        /// Retained predecessor job identity.
+        predecessor_job_id: MoveJobId,
+        /// Retained successor job identity.
+        successor_job_id: MoveJobId,
+    },
+    /// Commits the authoritative data-log fence after all predecessor seals.
+    CommitHandoffFence {
+        /// Data group whose predecessor is fenced.
+        data_group: GroupId,
+        /// Directory revision retained by the predecessor move.
+        predecessor_revision: u64,
+        /// Retained predecessor job identity.
+        predecessor_job_id: MoveJobId,
+        /// Retained successor job identity.
+        successor_job_id: MoveJobId,
+    },
 }
 
 /// Explicit destination identity prevents accidental cross-cluster/node routing.
@@ -156,6 +188,35 @@ pub enum BackendReply {
         /// Bounded applied proof, boxed to preserve ordinary reply size.
         result: Result<Box<AppliedMembership>, ReadFailure>,
     },
+    /// Frozen predecessor and preparing-successor state for a data group.
+    PreparedMoveState {
+        /// Group bound to the metadata read request.
+        data_group: GroupId,
+        /// Coherent handoff state, boxed off ordinary KV replies.
+        result: Result<Option<Box<PreparedMoveState>>, ReadFailure>,
+    },
+    /// One receiver's durable predecessor seal receipt.
+    PredecessorSealed {
+        /// Group bound to the seal request.
+        data_group: GroupId,
+        /// Retained predecessor job identity.
+        predecessor_job_id: MoveJobId,
+        /// Retained successor job identity.
+        successor_job_id: MoveJobId,
+        /// Durable receipt or an explicit read failure.
+        result: Result<SealReceipt, ReadFailure>,
+    },
+    /// The authoritative data-log fence for a predecessor-to-successor handoff.
+    HandoffFenced {
+        /// Group bound to the fence request.
+        data_group: GroupId,
+        /// Retained predecessor job identity.
+        predecessor_job_id: MoveJobId,
+        /// Retained successor job identity.
+        successor_job_id: MoveJobId,
+        /// Durable receipt or an explicit read failure.
+        result: Result<HandoffFenceReceipt, ReadFailure>,
+    },
 }
 
 /// A backend response identifies the node that produced it.
@@ -186,6 +247,9 @@ enum ExpectedKind {
     MoveState(GroupId),
     Reconcile(GroupId, MoveJobId),
     Membership(GroupId),
+    PreparedMoveState(GroupId),
+    PredecessorSeal(GroupId, u64, MoveJobId, MoveJobId),
+    HandoffFence(GroupId, u64, MoveJobId, MoveJobId),
 }
 
 impl WireRequest<BackendResponse> for BackendRequest {
@@ -221,8 +285,34 @@ impl WireRequest<BackendResponse> for BackendRequest {
             BackendOperation::GetMove { data_group }
             | BackendOperation::ReconcileMove { data_group, .. }
             | BackendOperation::ObserveMembership { data_group }
-            | BackendOperation::PublishMove { data_group, .. } => {
+            | BackendOperation::PublishMove { data_group, .. }
+            | BackendOperation::GetPreparedMove { data_group } => {
                 validate_group(*data_group, false)
+            }
+            BackendOperation::SealPredecessor {
+                data_group,
+                predecessor_revision,
+                predecessor_job_id,
+                successor_job_id,
+            }
+            | BackendOperation::CommitHandoffFence {
+                data_group,
+                predecessor_revision,
+                predecessor_job_id,
+                successor_job_id,
+            } => {
+                validate_group(*data_group, false)?;
+                if *predecessor_revision == 0 {
+                    return Err(ProtocolError::InvalidRouting(
+                        "invalid predecessor revision",
+                    ));
+                }
+                if predecessor_job_id == successor_job_id {
+                    return Err(ProtocolError::InvalidRouting(
+                        "predecessor and successor jobs must differ",
+                    ));
+                }
+                Ok(())
             }
             BackendOperation::Leader { group_id } => validate_group(*group_id, true),
             BackendOperation::Kv { group_id, request } => {
@@ -261,6 +351,31 @@ impl WireRequest<BackendResponse> for BackendRequest {
                 BackendOperation::PublishMove { data_group, job_id } => {
                     ExpectedKind::Move(*data_group, *job_id)
                 }
+                BackendOperation::GetPreparedMove { data_group } => {
+                    ExpectedKind::PreparedMoveState(*data_group)
+                }
+                BackendOperation::SealPredecessor {
+                    data_group,
+                    predecessor_revision,
+                    predecessor_job_id,
+                    successor_job_id,
+                } => ExpectedKind::PredecessorSeal(
+                    *data_group,
+                    *predecessor_revision,
+                    *predecessor_job_id,
+                    *successor_job_id,
+                ),
+                BackendOperation::CommitHandoffFence {
+                    data_group,
+                    predecessor_revision,
+                    predecessor_job_id,
+                    successor_job_id,
+                } => ExpectedKind::HandoffFence(
+                    *data_group,
+                    *predecessor_revision,
+                    *predecessor_job_id,
+                    *successor_job_id,
+                ),
                 BackendOperation::Directory => ExpectedKind::Directory,
                 BackendOperation::BootstrapDirectory => ExpectedKind::Bootstrap,
                 BackendOperation::Leader { group_id } => ExpectedKind::Leader(*group_id),
@@ -361,6 +476,72 @@ impl WireRequest<BackendResponse> for BackendRequest {
                     Err(error) => error.0.validate(),
                 }
             }
+            (
+                ExpectedKind::PreparedMoveState(group),
+                BackendReply::PreparedMoveState { data_group, result },
+            ) if group == *data_group => match result {
+                Ok(Some(state)) => {
+                    state.validate()?;
+                    if state.directory.cluster_id != expected.cluster_id
+                        || state.first.intent.data_group != group
+                    {
+                        return Err(ProtocolError::ResponseKindMismatch);
+                    }
+                    Ok(())
+                }
+                Ok(None) => Ok(()),
+                Err(error) => error.0.validate(),
+            },
+            (
+                ExpectedKind::PredecessorSeal(group, revision, predecessor_job, successor_job),
+                BackendReply::PredecessorSealed {
+                    data_group,
+                    predecessor_job_id,
+                    successor_job_id,
+                    result,
+                },
+            ) if group == *data_group
+                && predecessor_job == *predecessor_job_id
+                && successor_job == *successor_job_id =>
+            {
+                match result {
+                    Ok(receipt)
+                        if receipt.endpoint.node_id == expected.node_id
+                            && receipt.data_group == group
+                            && receipt.predecessor_revision == revision
+                            && receipt.predecessor_job_id == predecessor_job =>
+                    {
+                        validate_endpoint(&receipt.endpoint)
+                    }
+                    Ok(_) => Err(ProtocolError::ResponseKindMismatch),
+                    Err(error) => error.0.validate(),
+                }
+            }
+            (
+                ExpectedKind::HandoffFence(group, revision, predecessor_job, successor_job),
+                BackendReply::HandoffFenced {
+                    data_group,
+                    predecessor_job_id,
+                    successor_job_id,
+                    result,
+                },
+            ) if group == *data_group
+                && predecessor_job == *predecessor_job_id
+                && successor_job == *successor_job_id =>
+            {
+                match result {
+                    Ok(receipt)
+                        if receipt.data_group == group
+                            && receipt.predecessor_revision == revision
+                            && receipt.predecessor_job_id == predecessor_job
+                            && receipt.successor_job_id == successor_job =>
+                    {
+                        Ok(())
+                    }
+                    Ok(_) => Err(ProtocolError::ResponseKindMismatch),
+                    Err(error) => error.0.validate(),
+                }
+            }
             _ => Err(ProtocolError::ResponseKindMismatch),
         }
     }
@@ -369,6 +550,19 @@ impl WireRequest<BackendResponse> for BackendRequest {
 fn validate_group(group: GroupId, allow_metadata: bool) -> Result<(), ProtocolError> {
     if group.get() > 256 || (!allow_metadata && group.is_metadata()) {
         return Err(ProtocolError::InvalidRouting("invalid destination group"));
+    }
+    Ok(())
+}
+
+fn validate_endpoint(endpoint: &crate::routing::NodeEndpoint) -> Result<(), ProtocolError> {
+    if endpoint.peer_address == endpoint.data_address
+        || [endpoint.peer_address, endpoint.data_address]
+            .iter()
+            .any(|address| {
+                address.port() == 0 || address.ip().is_unspecified() || address.ip().is_multicast()
+            })
+    {
+        return Err(ProtocolError::InvalidRouting("invalid seal endpoint"));
     }
     Ok(())
 }

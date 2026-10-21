@@ -39,6 +39,9 @@ use tokio::{
 };
 
 mod group;
+mod handoff;
+#[cfg(test)]
+mod handoff_tests;
 mod metadata;
 #[cfg(test)]
 mod native_membership_observation;

@@ -10,6 +10,8 @@ mod append_failure;
 #[cfg(all(test, feature = "diagnostics"))]
 mod append_failure_tests;
 #[cfg(test)]
+mod handoff_fence_tests;
+#[cfg(test)]
 mod joint_apply_pause;
 mod keys;
 mod log;

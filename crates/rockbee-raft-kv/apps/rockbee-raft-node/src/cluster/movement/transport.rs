@@ -46,6 +46,7 @@ impl NodeService {
                 let success = matches!(
                     &reply,
                     BackendReply::MoveState { result: Ok(_), .. }
+                        | BackendReply::PreparedMoveState { result: Ok(_), .. }
                         | BackendReply::Move {
                             result: AdminResult::Completed { .. },
                             ..

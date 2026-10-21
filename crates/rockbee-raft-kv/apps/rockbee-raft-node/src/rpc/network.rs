@@ -386,6 +386,8 @@ fn fitting_append_prefix(request: &AppendEntriesRequest<TypeConfig>, frame_limit
                 }
                 crate::types::Command::Delete { key } => key.len().saturating_add(96),
                 crate::types::Command::Metadata(command) => metadata_entry_reservation(command),
+                // Fixed two job IDs, revision, full LogId and payload tags.
+                crate::types::Command::HandoffFence { .. } => 128,
             },
             EntryPayload::Membership(membership) => {
                 let configs = membership
@@ -454,6 +456,83 @@ mod tests {
 
     use super::super::{PeerLimits, message::decode_request_body};
     use super::*;
+
+    #[test]
+    fn handoff_fence_full_width_append_prefix_fits_actual_private_frames() {
+        use crate::types::Command;
+        use rockbee_raft_protocol::control::MoveJobId;
+
+        let command = Command::HandoffFence {
+            predecessor_revision: u64::MAX,
+            predecessor_job_id: MoveJobId::new([255; 16]).expect("predecessor"),
+            successor_job_id: MoveJobId::new([254; 16]).expect("successor"),
+        };
+        let previous = LogId::new(CommittedLeaderId::new(u64::MAX, u64::MAX), u64::MAX - 128);
+        let request: AppendEntriesRequest<TypeConfig> = AppendEntriesRequest {
+            vote: Vote::new(u64::MAX, u64::MAX),
+            prev_log_id: Some(previous),
+            entries: (0u64..128)
+                .map(|offset| Entry {
+                    log_id: LogId::new(
+                        CommittedLeaderId::new(u64::MAX, u64::MAX),
+                        u64::MAX - 127 + offset,
+                    ),
+                    payload: EntryPayload::Normal(command.clone()),
+                })
+                .collect(),
+            leader_commit: Some(previous),
+        };
+        for entry in &request.entries {
+            let actual = postcard::to_stdvec(&super::super::dto::WireEntry::from(entry))
+                .expect("wire entry");
+            assert!(
+                actual.len() <= 128,
+                "full-width fence exceeds its reservation"
+            );
+        }
+        let header = PeerHeader::request(
+            test_identity(1).cluster_id,
+            NodeId::new(u64::MAX).expect("source"),
+            NodeId::new(u64::MAX - 1).expect("target"),
+            GroupId::new(256),
+            PeerKind::AppendEntries,
+        );
+        let single_limit = APPEND_ENVELOPE_RESERVATION + 128;
+        assert_eq!(fitting_append_prefix(&request, single_limit - 1), 0);
+        assert_eq!(fitting_append_prefix(&request, single_limit), 1);
+        for limit in [single_limit, 4096, APPEND_ENVELOPE_RESERVATION + 128 * 128] {
+            let count = fitting_append_prefix(&request, limit);
+            assert_eq!(
+                count,
+                ((limit - APPEND_ENVELOPE_RESERVATION) / 128).min(128)
+            );
+            let selected = AppendEntriesRequest {
+                vote: request.vote,
+                prev_log_id: request.prev_log_id,
+                entries: request.entries[..count].to_vec(),
+                leader_commit: request.leader_commit,
+            };
+            let frame = encode_request(
+                &PeerRequest {
+                    header: header.clone(),
+                    body: PeerRequestBody::AppendEntries(selected),
+                },
+                limit,
+            )
+            .expect("selected full-width prefix fits its actual frame");
+            assert!(frame.len() <= limit + 4);
+            let body = &frame[4 + PEER_HEADER_BYTES..];
+            let decoded = decode_request_body(PeerKind::AppendEntries, body)
+                .expect("decode actual frame body");
+            let PeerRequestBody::AppendEntries(decoded) = decoded else {
+                unreachable!("append kind yields append body")
+            };
+            assert_eq!(decoded.vote, request.vote);
+            assert_eq!(decoded.prev_log_id, request.prev_log_id);
+            assert_eq!(decoded.leader_commit, request.leader_commit);
+            assert_eq!(decoded.entries, request.entries[..count]);
+        }
+    }
 
     #[test]
     fn oversized_batch_is_split_before_wire_dto_copies() {

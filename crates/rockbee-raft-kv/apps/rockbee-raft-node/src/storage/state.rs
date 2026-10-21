@@ -333,6 +333,7 @@ fn apply_chunk(
                 "state apply cannot replay or move applied progress backwards",
             ));
         }
+        let mut result = ApplyResult::Applied;
         match entry.payload {
             EntryPayload::Blank => {}
             EntryPayload::Membership(membership) => {
@@ -344,6 +345,18 @@ fn apply_chunk(
             EntryPayload::Normal(Command::Delete { key }) => {
                 batch.delete_cf(cf, keys::data(group.id, state.generation, &key))
             }
+            EntryPayload::Normal(Command::HandoffFence { .. }) => {
+                if group.id == 0 {
+                    return Err(error(
+                        ErrorSubject::Apply(entry.log_id),
+                        ErrorVerb::Write,
+                        "handoff fence requires a data group",
+                    ));
+                }
+                // The normal applied record persists the exact fence LogId in
+                // the same batch. No application key or membership is changed.
+                result = ApplyResult::HandoffFenced;
+            }
             EntryPayload::Normal(Command::Metadata(_)) => {
                 return Err(error(
                     ErrorSubject::StateMachine,
@@ -353,7 +366,7 @@ fn apply_chunk(
             }
         }
         state.applied = Some(entry.log_id);
-        results.push(ApplyResult::Applied);
+        results.push(result);
     }
     batch.put_cf(
         cf,

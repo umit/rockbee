@@ -225,6 +225,48 @@ impl NodeService {
             return rejection(&request.operation, failure);
         }
         match request.operation {
+            BackendOperation::GetPreparedMove { data_group } => BackendReply::PreparedMoveState {
+                data_group,
+                result: self.read_prepared_move(data_group, deadline).await,
+            },
+            BackendOperation::SealPredecessor {
+                data_group,
+                predecessor_revision,
+                predecessor_job_id,
+                successor_job_id,
+            } => BackendReply::PredecessorSealed {
+                data_group,
+                predecessor_job_id,
+                successor_job_id,
+                result: self
+                    .seal_predecessor(
+                        data_group,
+                        predecessor_revision,
+                        predecessor_job_id,
+                        successor_job_id,
+                        deadline,
+                    )
+                    .await,
+            },
+            BackendOperation::CommitHandoffFence {
+                data_group,
+                predecessor_revision,
+                predecessor_job_id,
+                successor_job_id,
+            } => BackendReply::HandoffFenced {
+                data_group,
+                predecessor_job_id,
+                successor_job_id,
+                result: self
+                    .commit_handoff_fence(
+                        data_group,
+                        predecessor_revision,
+                        predecessor_job_id,
+                        successor_job_id,
+                        deadline,
+                    )
+                    .await,
+            },
             BackendOperation::MoveReplica(request) => {
                 let data_group = request.data_group;
                 let job_id = request.job_id;
@@ -705,6 +747,32 @@ pub(super) fn check_read_deadline(deadline: Instant) -> Result<(), ReadFailure> 
 
 fn rejection(operation: &BackendOperation, error: Failure) -> BackendReply {
     match operation {
+        BackendOperation::GetPreparedMove { data_group } => BackendReply::PreparedMoveState {
+            data_group: *data_group,
+            result: Err(ReadFailure(error)),
+        },
+        BackendOperation::SealPredecessor {
+            data_group,
+            predecessor_job_id,
+            successor_job_id,
+            ..
+        } => BackendReply::PredecessorSealed {
+            data_group: *data_group,
+            predecessor_job_id: *predecessor_job_id,
+            successor_job_id: *successor_job_id,
+            result: Err(ReadFailure(error)),
+        },
+        BackendOperation::CommitHandoffFence {
+            data_group,
+            predecessor_job_id,
+            successor_job_id,
+            ..
+        } => BackendReply::HandoffFenced {
+            data_group: *data_group,
+            predecessor_job_id: *predecessor_job_id,
+            successor_job_id: *successor_job_id,
+            result: Err(ReadFailure(error)),
+        },
         BackendOperation::MoveReplica(request) => BackendReply::Move {
             data_group: request.data_group,
             job_id: request.job_id,

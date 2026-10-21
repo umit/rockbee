@@ -23,6 +23,8 @@ pub(in crate::cluster) struct MoveRunners {
     #[cfg(test)]
     pub(super) native_membership:
         Mutex<Option<Arc<native_membership_observation::NativeMembershipObservation>>>,
+    #[cfg(test)]
+    pub(super) handoff_seal: Mutex<Option<Arc<handoff_tests::SealObservation>>>,
 }
 
 impl MoveRunners {
@@ -42,6 +44,8 @@ impl MoveRunners {
             before_publication: Mutex::new(None),
             #[cfg(test)]
             native_membership: Mutex::new(None),
+            #[cfg(test)]
+            handoff_seal: Mutex::new(None),
         }
     }
     pub(in crate::cluster) fn stop(&self) {

@@ -1,6 +1,7 @@
 //! Types persisted in each group's replicated log; GET is never a log command.
 use crate::control::{MetadataCommand, MetadataResult};
 use bytes::Bytes;
+use rockbee_raft_protocol::control::MoveJobId;
 use rockbee_raft_protocol::{MAX_KEY_BYTES, MAX_VALUE_BYTES, ProtocolError};
 use serde::{Deserialize, Serialize};
 
@@ -15,14 +16,33 @@ pub enum Command {
     },
     /// Appended tag two; boxing keeps ordinary KV command payloads compact.
     Metadata(Box<MetadataCommand>),
+    /// Appended tag three. Orders predecessor handoff without touching user KV.
+    HandoffFence {
+        predecessor_revision: u64,
+        predecessor_job_id: MoveJobId,
+        successor_job_id: MoveJobId,
+    },
 }
 
 impl Command {
-    /// Checks public KV limits again at the durable-command boundary.
+    /// Checks intrinsic command constraints again at the durable boundary.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         let key = match self {
             Self::Put { key, .. } | Self::Delete { key } => key,
             Self::Metadata(command) => return command.validate(),
+            Self::HandoffFence {
+                predecessor_revision,
+                predecessor_job_id,
+                successor_job_id,
+            } => {
+                return if *predecessor_revision == 0 || predecessor_job_id == successor_job_id {
+                    Err(ProtocolError::InvalidRouting(
+                        "invalid handoff fence identity",
+                    ))
+                } else {
+                    Ok(())
+                };
+            }
         };
         if key.is_empty() || key.len() > MAX_KEY_BYTES {
             return Err(ProtocolError::InvalidKeyLength(key.len()));
@@ -41,6 +61,8 @@ pub enum ApplyResult {
     Applied,
     /// Appended tag one; historical Applied remains tag zero.
     Metadata(MetadataResult),
+    /// Appended tag two; only the internal handoff command produces this result.
+    HandoffFenced,
 }
 
 // This macro wires command/result/node/snapshot/runtime types into OpenRaft.
@@ -71,6 +93,44 @@ mod tests {
     enum LegacyCommand {
         Put { key: Bytes, value: Bytes },
         Delete { key: Bytes },
+    }
+
+    #[test]
+    fn handoff_fence_rejects_zero_revision_and_same_job_identity() {
+        let first = MoveJobId::new([1; 16]).expect("first job");
+        let next = MoveJobId::new([2; 16]).expect("next job");
+        for (revision, successor, valid) in [(1, next, true), (0, next, false), (1, first, false)] {
+            assert_eq!(
+                Command::HandoffFence {
+                    predecessor_revision: revision,
+                    predecessor_job_id: first,
+                    successor_job_id: successor,
+                }
+                .validate()
+                .is_ok(),
+                valid
+            );
+        }
+    }
+
+    #[test]
+    fn handoff_fence_appends_tags_and_preserves_inline_kv_size() {
+        let command = Command::HandoffFence {
+            predecessor_revision: u64::MAX,
+            predecessor_job_id: MoveJobId::new([1; 16]).expect("first job"),
+            successor_job_id: MoveJobId::new([2; 16]).expect("next job"),
+        };
+        let bytes = postcard::to_stdvec(&command).expect("fence encoding");
+        assert_eq!(bytes[0], 3);
+        assert_eq!(
+            postcard::from_bytes::<Command>(&bytes).expect("fence decode"),
+            command
+        );
+        assert_eq!(
+            postcard::to_stdvec(&ApplyResult::HandoffFenced).expect("result"),
+            [2]
+        );
+        assert!(size_of::<Command>() <= size_of::<LegacyCommand>() + size_of::<usize>());
     }
 
     #[test]

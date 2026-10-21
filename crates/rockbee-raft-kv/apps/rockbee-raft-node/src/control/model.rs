@@ -233,32 +233,7 @@ pub enum MetadataError {
     EncodedLimit,
 }
 
-/// Frozen candidate and exact predecessor executor census; never runnable.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PreparingSuccessor {
-    pub intent: MoveIntent,
-    pub executors: [NodeEndpoint; 4],
-}
-
-/// A receiver's acknowledgement of durable local predecessor seal and drain.
-/// Runtime construction and causality are a later checkpoint, not a certificate.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SealReceipt {
-    pub endpoint: NodeEndpoint,
-    pub data_group: GroupId,
-    pub predecessor_revision: u64,
-    pub predecessor_job_id: MoveJobId,
-}
-
-/// Actual data-log fence identity, explicitly bound to both jobs and the group.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct HandoffFenceReceipt {
-    pub data_group: GroupId,
-    pub predecessor_revision: u64,
-    pub predecessor_job_id: MoveJobId,
-    pub successor_job_id: MoveJobId,
-    pub committed: CommittedLogPosition,
-}
+pub use rockbee_raft_protocol::backend::{HandoffFenceReceipt, PreparingSuccessor, SealReceipt};
 
 /// Fixed evidence retained by an internal activation. Static validation checks
 /// binding and history coverage; actual seal-before-fence ordering is runtime work.

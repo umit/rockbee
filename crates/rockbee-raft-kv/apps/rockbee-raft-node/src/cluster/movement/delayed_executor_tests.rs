@@ -20,6 +20,7 @@ use tokio::{
 struct DelayedFixture {
     cluster: RelayFixture,
     pause: Mutex<Option<Arc<JointApplyPause>>>,
+    seal_link: tokio::sync::Mutex<Option<BackendLink>>,
 }
 
 pub(super) struct Scenario {
@@ -41,15 +42,27 @@ pub(super) struct BackendReceipt {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delayed_b_native_membership_returns_only_after_a_completes_same_job() {
-    run_delayed_executor(false).await;
+    run_delayed_executor(SealMode::None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn local_move_seal_waits_for_the_whole_native_membership_call() {
-    run_delayed_executor(true).await;
+    run_delayed_executor(SealMode::Local).await;
 }
 
-async fn run_delayed_executor(seal_before_release: bool) {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SealMode {
+    None,
+    Local,
+    Remote,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn handoff_seal_retains_actual_native_owner_after_caller_close() {
+    run_delayed_executor(SealMode::Remote).await;
+}
+
+async fn run_delayed_executor(mode: SealMode) {
     let _ = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("rockbee_raft_node=info"),
     )
@@ -58,16 +71,18 @@ async fn run_delayed_executor(seal_before_release: bool) {
     let owner = Arc::new(DelayedFixture {
         cluster: RelayFixture::start().await.unwrap(),
         pause: Mutex::new(None),
+        seal_link: tokio::sync::Mutex::new(None),
     });
     let scenario_owner = Arc::clone(&owner);
     // The assertion task never owns the only release/runtime handles. A failed
     // native-pending premise still releases first and joins the original work.
-    let outcome = tokio::spawn(async move {
-        delayed_executor_scenario(&scenario_owner, seal_before_release).await
-    })
-    .await;
+    let outcome =
+        tokio::spawn(async move { delayed_executor_scenario(&scenario_owner, mode).await }).await;
     if let Some(pause) = owner.pause.lock().unwrap().as_ref() {
         pause.release();
+    }
+    if let Some(link) = owner.seal_link.lock().await.as_ref() {
+        link.close().await;
     }
     restore_elections(&owner.cluster.nodes);
     owner.cluster.relays.heal();
@@ -90,7 +105,8 @@ async fn run_delayed_executor(seal_before_release: bool) {
     }
 }
 
-async fn delayed_executor_scenario(owner: &DelayedFixture, seal_before_release: bool) {
+async fn delayed_executor_scenario(owner: &DelayedFixture, mode: SealMode) {
+    let seal_before_release = mode == SealMode::Local;
     let scenario = establish_baseline(&owner.cluster).await;
     let nodes = &owner.cluster.nodes;
     let (pause, joint, observer, original) = start_b_native_joint(owner, &scenario).await;
@@ -133,6 +149,14 @@ async fn delayed_executor_scenario(owner: &DelayedFixture, seal_before_release: 
             original.invocation
         );
     }
+    let remote = if mode == SealMode::Remote {
+        let observation = start_held_receiver(owner, &scenario, &completed).await;
+        require_original_pending(nodes, &scenario, &pause, &joint, &observer, &original);
+        assert!(observation.snapshot().unwrap().result.is_none());
+        Some(observation)
+    } else {
+        None
+    };
     let release_requested_at = Instant::now();
     pause.release();
     timeout_at(scenario.deadline, pause.wait_exited())
@@ -159,6 +183,19 @@ async fn delayed_executor_scenario(owner: &DelayedFixture, seal_before_release: 
             "raft_move_seal_complete node=2 invocation={} native_result={:?} seal_ack=true later_native_admission=false",
             original.invocation,
             returned.result
+        );
+    }
+    if let Some(observation) = remote {
+        let sealed = observation.wait(true, scenario.deadline).await;
+        assert_eq!(sealed.result, Some(Ok(())));
+        assert!(sealed.entered_at <= release_requested_at);
+        assert!(sealed.returned_at.unwrap() >= returned.returned_at.unwrap());
+        assert!(control.begin(identity).await.is_err());
+        log::info!(
+            "raft_handoff_owned_seal node=2 group={} predecessor={:?} successor={:?} caller_closed_before_release=true original_native_return_before_seal=true actual_seal_ok=true stale_native_rejected=true",
+            scenario.group.get(),
+            sealed.identity.predecessor_job_id.get(),
+            sealed.identity.successor_job_id.get()
         );
     }
     assert!(a_completed_at <= release_requested_at);
@@ -192,6 +229,106 @@ async fn delayed_executor_scenario(owner: &DelayedFixture, seal_before_release: 
 
 async fn establish_baseline(fixture: &RelayFixture) -> Scenario {
     establish_baseline_at(fixture, 1, MoveJobId::new([111; 16]).unwrap()).await
+}
+
+/// Submit through TCP while the exact B membership await still owns its gate.
+/// The outer fixture retains both the pause release and the caller Link.
+async fn start_held_receiver(
+    owner: &DelayedFixture,
+    scenario: &Scenario,
+    completed: &MoveState,
+) -> Arc<handoff_tests::SealObservation> {
+    let fixture = &owner.cluster;
+    let successor = MoveReplica {
+        job_id: MoveJobId::new([113; 16]).unwrap(),
+        data_group: scenario.group,
+        remove_node: NodeId::new(2).unwrap(),
+        add_node: fixture.endpoints[2].clone(),
+        expected_directory_revision: completed.directory.revision,
+    }
+    .derive_intent(&completed.directory)
+    .unwrap();
+    let metadata = healthy_leader(
+        &fixture.nodes,
+        GroupId::new(0),
+        &[0, 1, 2],
+        scenario.deadline,
+    )
+    .await;
+    let result = fixture.nodes[metadata].service.groups[&GroupId::new(0)]
+        .raft
+        .client_write(Command::Metadata(Box::new(
+            MetadataCommand::PrepareSuccessor {
+                predecessor_job_id: scenario.intent.job_id,
+                intent: successor.clone(),
+            },
+        )))
+        .await
+        .unwrap();
+    assert!(matches!(
+        result.data,
+        ApplyResult::Metadata(MetadataResult::Prepared { .. })
+    ));
+    let identity = handoff::HandoffIdentity {
+        data_group: scenario.group,
+        predecessor_revision: scenario.intent.expected_directory_revision,
+        predecessor_job_id: scenario.intent.job_id,
+        successor_job_id: successor.job_id,
+    };
+    let observation = Arc::new(handoff_tests::SealObservation::new(identity));
+    let b = &fixture.nodes[1];
+    *b.service.movement.handoff_seal.lock().unwrap() = Some(Arc::clone(&observation));
+    let link = BackendLink::connect(
+        b.config.endpoint.data_address,
+        LinkConfig::default(),
+        scenario.deadline,
+    )
+    .await
+    .unwrap();
+    *owner.seal_link.lock().await = Some(link);
+    let pending = owner
+        .seal_link
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .try_submit(
+            BackendRequest {
+                cluster_id: b.config.cluster_id,
+                target_node: b.config.node_id,
+                operation: BackendOperation::SealPredecessor {
+                    data_group: identity.data_group,
+                    predecessor_revision: identity.predecessor_revision,
+                    predecessor_job_id: identity.predecessor_job_id,
+                    successor_job_id: identity.successor_job_id,
+                },
+            },
+            scenario.deadline,
+        )
+        .unwrap();
+    let entered = observation.wait(false, scenario.deadline).await;
+    assert_eq!(entered.identity, identity);
+    assert!(entered.result.is_none());
+    assert!(
+        !b.service.groups[&scenario.group]
+            .reader
+            .membership_control()
+            .native_permit_available_for_test()
+    );
+    owner.seal_link.lock().await.as_ref().unwrap().close().await;
+    let caller_result = pending.await;
+    assert!(
+        caller_result.is_err(),
+        "closed caller cannot observe a seal ACK: {caller_result:?}"
+    );
+    assert!(observation.snapshot().unwrap().result.is_none());
+    log::info!(
+        "raft_handoff_caller_closed node=2 group={} predecessor={:?} successor={:?} validated_handler_entered=true original_native_gate_held=true seal_result=None",
+        identity.data_group.get(),
+        identity.predecessor_job_id.get(),
+        identity.successor_job_id.get()
+    );
+    observation
 }
 
 pub(super) async fn establish_baseline_at(
