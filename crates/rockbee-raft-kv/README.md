@@ -5,20 +5,73 @@ Multi-Raft key-value database using OpenRaft, RocksDB, and a dedicated gateway.
 
 Location in the repository: `crates/rockbee-raft-kv/`.
 
-**Status: first real client-to-database path verified locally.** The public client
-can PUT, GET and DELETE through a gateway into three OpenRaft/RocksDB nodes with
-four data groups. Runtime tests also cover leader shutdown, surviving-quorum
-reads/deletes, disk reopen and replica catch-up. Node and gateway entry points
-now start their actual runtimes. A three-process test also preserves an
-acknowledged value after killing all node processes and reopening their existing
-databases. A blank fourth node now receives a streamed snapshot plus later logs
-and preserves them on offline reopen. A finite ABC-to-ABD replica move is also
-verified: after D becomes the actual leader, the same running gateway and client
-refresh routing and complete GET, PUT and DELETE.
+**Status: a working distributed KV foundation, verified locally.** The public
+client, gateway, OpenRaft groups, and RocksDB storage run together. The following
+records implemented capabilities and the scope of the checks already completed.
 
-Movement currently permits **one immutable lifetime target per data group**;
-metadata voters and sibling groups stay unchanged. General repeated moves and
-the remaining partition/crash schedules are still in progress.
+## Implemented and locally verified
+
+```text
+RockBeeRaftClient -> Gateway -> key's Raft group
+                              -> leader + two replicas -> RocksDB on each node
+```
+
+| Capability | Implemented behavior |
+| --- | --- |
+| Public KV API | The Rust client performs opaque byte PUT, GET, and DELETE through the gateway into real nodes. JSON can be stored as bytes; the KV path does not interpret its fields. |
+| Multi-Raft routing | Nodes host multiple independent Raft groups; leadership belongs to each group. The gateway routes keys to their group and leader. The local complete-path fixture uses three nodes and four data groups. |
+| Durable writes and strong reads | `Committed` means a durable consensus acknowledgement. GET uses an OpenRaft read barrier: after an acknowledged write, a later successful read observes that write or a later committed change. Quorum loss may return an error. |
+| Bounded asynchronous client | PUT and DELETE return eager completion handles. Dropping a handle does not cancel admitted work. Request IDs correlate out-of-order replies; request-count and byte limits bound pipelining across client clones. |
+| Explicit write uncertainty | Outcomes distinguish `Committed`, `NotSent`, `Rejected`, and `Unknown`. A lost response may leave a committed mutation `Unknown`; the client does not automatically reconnect or replay it. Request IDs are correlation IDs, not exactly-once tokens. |
+| Recovery and replica catch-up | Local tests cover leader shutdown, surviving-quorum reads/deletes, reopening all three killed node processes with acknowledged data intact, and snapshot plus log catch-up to a blank fourth node. |
+| First replica movement | A finite `ABC -> ABD` move is verified. D becomes the actual leader, and the same running client and gateway refresh routing and complete GET, PUT, and DELETE. |
+| Logs and client statistics | Client, transport, gateway, Raft adapters, and storage emit `log` messages without key/value payloads. `stats()` and `stats_handle()` expose fixed operation lifecycle counters, including uncertain outcomes. |
+| Foundations for a second move | Durable successor preparation, predecessor sealing, activation validation, and actual data-log fence receivers are implemented and tested. These are building blocks; an actual second move is still unfinished as described below. |
+
+The [client guide](crates/rockbee-raft-client/README.md) explains API guarantees.
+The [runtime tests](apps/rockbee-raft-node/tests/runtime.rs) and
+[process tests](apps/rockbee-raft-node/tests/processes.rs) exercise the public
+path and owned node processes.
+
+### Recorded verification checkpoint
+
+At local commit `84a40d7` on **2026-10-21**, the recorded full workspace run had
+**402 passed, 0 failed, and 1 manual soak test ignored**. Formatting, strict
+Clippy in both checked feature configurations, and the diff check passed.
+The local evidence files are `reports/m4b-receiver-evidence.json` and
+`reports/m4b-receiver-workspace-final.log`.
+
+Completed checks also include real TCP reply loss, selected process-crash and
+disk-reopen scenarios, and a bounded test-only history checker for detecting
+inconsistent reads and missing committed effects in recorded histories.
+Receiver tests cover a disconnected caller while admitted sealing work drains
+and completes, plus rejection of stale predecessor work.
+
+An earlier **600-second local soak** at commit `3868e7f` completed **1,314,816
+successful operations with zero reported errors or wrong values**, using three
+independent clients, one gateway, and three node processes. It used a debug
+build, four data groups, 12 fixed keys, and 1 KiB values in a warm, closed-loop
+workload. The local report is `reports/soak/stable-SocGPQ/report.md`. This records
+that workload's correctness; maximum capacity and long-running fault coverage
+remain open below.
+
+## Current limitations and open work
+
+This is a locally verified development workspace. The following limits apply
+specifically to `rockbee-raft-kv`; the separate SlateDB/DuckDB-based Rockbee
+workspace has its own features and consistency guarantees.
+
+| Area | Current limitation |
+| --- | --- |
+| Repeated replica movement | The public movement API supports one immutable lifetime target per data group, with `ABC -> ABD` verified. Durable successor preparation, predecessor sealing, data-log fences, and activation validation are implemented, but the coordinator for an actual second move (`ABD -> ACD`) is not connected end to end. Metadata voters and sibling groups remain unchanged. |
+| Automatic cluster management | Adding a node does not automatically redistribute data. Automatic shard splitting, placement, and rebalancing are not implemented. |
+| Data API | The Raft client supports opaque byte PUT, GET, and DELETE. TTL, SQL, a JSON table API, and multi-key transactions are not implemented in this workspace. |
+| Storage | RocksDB requires local disk on the storage nodes. This workspace does not provide a diskless or S3-backed durable storage engine. |
+| Production readiness | TLS/authentication and complete operational tooling are not implemented. Broader network-partition and disk-failure coverage, plus long-running soak and resource validation, remain incomplete. Existing logs, client counters, and local recovery tests cover only part of this work. |
+| Capacity and performance | A 500 GB deployment, maximum throughput, and latency under representative production load have not been validated. Local functional tests and the completed local soak runs do not establish those capacity or performance limits. |
+
+Detailed evidence and remaining scenarios are tracked in
+[progress](docs/progress.md) and the [failure matrix](docs/failure-matrix.md).
 
 ## Packages
 
