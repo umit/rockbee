@@ -1,3 +1,11 @@
+# User-selected settings for all Rockbee coding-agent roles.
+model = "gpt-6-astra"
+model_reasoning_effort = "ultra"
+service_tier = "fast"
+
+[features]
+fast_mode = true
+
 # Keep Superpowers disabled for the Rockbee workspace.
 [plugins."superpowers@superpowers-dev"]
 enabled = false

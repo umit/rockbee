@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#090f1d">
+  <meta name="description" content="Rockbee: durable bytes, flexible JSON tables, and DuckDB SQL. One writer, independent readers, shared object storage.">
+  <title>Rockbee — One durable core. Independent readers.</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%237be6ca' d='M16 2 29 9v14l-13 7L3 23V9z'/%3E%3Cpath fill='%23090f1d' d='m10 10 6-3 6 3v5l-6 3-6-3zm0 9 6 3 6-3v4l-6 3-6-3z'/%3E%3C/svg%3E">
+  <style>
+    :root{color-scheme:dark;--bg:#090f1d;--panel:#101a2b;--panel-deep:#0c1424;--line:#243147;--muted:#95a6bf;--text:#ecf2fb;--accent:#7be6ca;--blue:#91bbff;--mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;--sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:90px}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--sans);-webkit-font-smoothing:antialiased}button,input,textarea,select{font:inherit}a{color:inherit;text-decoration:none}button,a,input,textarea,select{-webkit-tap-highlight-color:transparent}button{cursor:pointer}button:disabled{cursor:default}button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,pre:focus-visible{outline:2px solid var(--accent);outline-offset:5px}::selection{background:#7be6ca;color:#090f1d}.wrap{width:min(1240px,calc(100% - 96px));margin-inline:auto}.skip{position:fixed;left:16px;top:-80px;z-index:20;background:var(--accent);color:var(--bg);padding:10px 18px}.skip:focus{top:16px}.mono,.eyebrow,.tag,.pane-label,.step-num{font-family:var(--mono)}.eyebrow{font-size:10px;letter-spacing:.16em;color:var(--accent);text-transform:uppercase}.eyebrow::before{content:"";display:inline-block;width:6px;height:6px;background:var(--accent);margin:0 10px 2px 0}.muted{color:var(--muted)}
+    .site-header{height:96px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}.brand{display:flex;align-items:center;gap:11px;font-size:25px;font-weight:650;letter-spacing:-1.1px}.brand svg{width:30px;height:34px;color:var(--accent)}nav{display:flex;align-items:center;gap:30px;font-size:13px;color:#afbed2}.nav-source{border:1px solid #344258;border-radius:6px;padding:9px 16px;color:var(--text)}nav a:hover{color:var(--accent)}.variant-index{font:10px var(--mono);letter-spacing:.06em;color:#8091aa}
+    .hero{padding:90px 0 78px;display:grid;grid-template-columns:1.03fr 1fr;gap:55px;align-items:center}.hero h1{font-size:clamp(48px,4.7vw,68px);line-height:1.07;font-weight:590;letter-spacing:-3.5px;margin:23px 0 24px}.hero h1 span{color:var(--accent)}.hero .lead{max-width:475px;font-size:17px;line-height:1.75;color:#adbbce;margin:0}.hero .lead strong{font-weight:450;color:#e6edf7}.actions{display:flex;align-items:center;gap:23px;margin-top:31px}.button{display:inline-flex;justify-content:center;align-items:center;gap:24px;border-radius:5px;border:1px solid transparent;font-weight:600;font-size:13px;min-height:46px;padding:12px 19px;background:var(--accent);color:#09261f;transition:background .2s,transform .2s}.button:hover{background:#a4f5dd;transform:translateY(-1px)}.text-link{font-size:13px;border-bottom:1px solid #536077;padding-bottom:4px}.text-link:hover{color:var(--accent)}.hero-note{margin:22px 0 0;color:#70829d;font:10px/1.7 var(--mono)}.hero-note span{color:#acbdd2}
+    .map-card{position:relative;background:radial-gradient(ellipse at 60% 40%,#14283c 0,transparent 65%),var(--panel-deep);border:1px solid #29394e;border-radius:12px;box-shadow:0 28px 75px #0003;overflow:hidden}.map-head{display:flex;justify-content:space-between;align-items:center;padding:21px 24px;border-bottom:1px solid #243247}.map-head strong{font:11px var(--mono);letter-spacing:.04em;font-weight:450}.tag{font-size:9px;letter-spacing:.04em;color:#8ca1ba}.map-tabs{display:flex;gap:4px;padding:17px 23px 0}.map-tabs button,.request-tabs button{border:0;background:transparent;border-radius:4px;color:#8396b2;font:11px var(--mono);padding:8px 14px}.map-tabs button[aria-pressed=true],.request-tabs button[aria-pressed=true]{background:#19392f;color:var(--accent)}.map-tabs button:hover,.request-tabs button:hover{color:var(--text)}.network{position:relative;height:265px;margin:0 20px}.wires{position:absolute;inset:0;width:100%;height:100%;overflow:visible}.wire{fill:none;stroke:#34465e;stroke-width:1.5}.wire.active{stroke:var(--accent);stroke-width:2}.wire.async{stroke-dasharray:4 5}.wire-label{font:10px var(--mono);fill:#7c91ac}.node{position:absolute;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;border:1px solid #30415a;background:#101d30;border-radius:6px;padding:13px 10px;color:var(--text);font-size:11px;line-height:1.4;min-height:65px;transition:border-color .2s,background .2s;text-align:left}.node span{font:9px var(--mono);color:#8398b5;margin-top:5px}.node.route-on{border-color:#67d2b7;background:#122f30;box-shadow:0 0 0 4px #7be6ca05}.node[aria-pressed=true]{box-shadow:0 0 0 2px #91bbff}.node-client{left:0;top:40%;width:20%}.node-gateway{left:28%;top:40%;width:21%}.node-writer{left:58%;top:7%;width:25%}.node-reader{left:58%;top:72%;width:25%}.node-store{left:84%;top:40%;width:16%;padding-inline:7px}.node-store span{font-size:8px}.node-detail{min-height:71px;border-top:1px solid #25344a;padding:17px 23px;background:#0e1829;font-size:11px;line-height:1.7;color:#a0b1c9}.node-detail b{color:var(--accent);font-weight:500}.map-caption{display:flex;justify-content:space-between;gap:14px;font:9px/1.7 var(--mono);color:#71849f;margin:13px 2px 0}.map-caption span:last-child{color:#a2b4cb}.route-inline{color:#b7c7dc}
+    .capabilities{border-top:1px solid var(--line);border-bottom:1px solid var(--line);display:grid;grid-template-columns:repeat(3,1fr);padding:25px 0;gap:30px}.capability{display:flex;gap:18px;align-items:flex-start}.capability .index{color:#4f617d;font:10px var(--mono);padding-top:3px}.capability strong{display:block;font-size:13px;font-weight:550}.capability p{font-size:11px;color:var(--muted);margin:3px 0 0}
+    .section{padding-block:94px}.section-top{display:flex;justify-content:space-between;align-items:end;gap:45px;margin-bottom:34px}h2{font-size:42px;font-weight:530;line-height:1.18;letter-spacing:-1.65px;margin:14px 0 0}.section-top>p{max-width:375px;font-size:14px;color:#99abc4;line-height:1.85;margin:0 0 4px}.console{border:1px solid #2c3b52;border-radius:10px;overflow:hidden;background:var(--panel-deep)}.console-bar{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:15px 23px;border-bottom:1px solid #28374d;background:#121e31}.console-title{font:10px var(--mono);letter-spacing:.04em;color:#c3d1e5}.demo-label{display:flex;gap:8px;align-items:center;font:9px var(--mono);color:#92a6c0}.demo-label:before{content:"";width:5px;height:5px;border:1px solid #8ca3bf;transform:rotate(45deg)}.console-body{display:grid;grid-template-columns:1.03fr 1fr}.request{border-right:1px solid #28374d;padding:23px}.request-tabs{display:flex;gap:4px;margin:-5px 0 24px}.request-tabs button{padding:9px 16px}.pane-label{display:block;color:#a9bbd2;font-size:10px;letter-spacing:.07em;margin-bottom:10px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.field label{display:block;font-size:10px;color:#8096b2;margin-bottom:7px}.field input,.field select,.field textarea{width:100%;border:1px solid #34445d;background:#0b1423;color:#dce8f8;border-radius:4px;font:11px/1.7 var(--mono);padding:9px 11px;min-height:38px}.field textarea{resize:vertical;min-height:117px}.field input:disabled{color:#6b819d;background:#101a2a}.document-field{margin:17px 0}.ttl-note{font:9px/1.6 var(--mono);margin:8px 0 20px;color:#7f96b4}.request-panel[hidden]{display:none}.sql-text{white-space:pre-wrap;word-break:break-word;color:#c5d7f2;font:12px/1.9 var(--mono);background:#0a1221;border-left:2px solid #72b8f5;padding:17px;margin:17px 0 21px}.syntax-purple{color:#c3b3f5}.syntax-green{color:#8ee4c0}.syntax-blue{color:#93bafb}.run-row{display:flex;align-items:center;gap:17px;flex-wrap:wrap;margin-top:22px}.run-row .button{min-height:39px;padding:9px 15px;gap:18px;font-size:11px}.form-note{font-size:10px;color:#8093af;max-width:220px}.response{padding:26px 25px;display:flex;flex-direction:column;min-height:430px;background:linear-gradient(145deg,#101c2e,#0c1424)}.response-top{display:flex;justify-content:space-between;align-items:center;gap:15px}.response-top span:last-child{font:9px var(--mono);color:#7b91ae}.response pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.95 var(--mono);color:#a6decc;margin:22px 0;min-height:143px}.trace{list-style:none;padding:0;margin:auto 0 0;display:flex;flex-wrap:wrap;gap:5px 10px;font:9px/1.7 var(--mono);color:#8b9fbc}.trace li:not(:last-child)::after{content:"→";margin-left:10px;color:#4f6685}.trace li:last-child{color:var(--accent)}.response-note{font-size:11px;line-height:1.8;color:#859bb7;border-top:1px solid #25344a;padding-top:17px;margin:20px 0 0}.export-bar{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:18px 23px;border-top:1px solid #29394f;background:#111f31}.export-copy{font-size:11px;color:#9badc5;max-width:610px}.export-copy strong{font-weight:500;color:#c6d7ec;display:block;margin-bottom:3px}.advance{flex-shrink:0;background:transparent;border:1px solid #4b7180;border-radius:4px;color:var(--accent);font:10px var(--mono);padding:10px 13px;min-height:38px}.advance:disabled{border-color:#2b3b50;color:#637b98}.demo-foot{display:flex;justify-content:space-between;gap:25px;font-size:10px;color:#6f85a4;margin:14px 2px 0}.demo-foot button{padding:0;border:0;background:none;color:#9db4d1;border-bottom:1px solid #3c516e;font-size:10px;flex-shrink:0}.demo-foot button:hover{color:var(--accent)}.dataset{margin-top:27px;border:1px solid #26364d;border-radius:7px;overflow:hidden}.dataset-head{display:flex;align-items:center;justify-content:space-between;padding:15px 19px;background:#101a2b}.dataset-head strong{font:10px var(--mono);font-weight:400;color:#adc0d9}.dataset-head span{font:9px var(--mono);color:#8299b6}.table-scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:11px}th{font:9px var(--mono);letter-spacing:.05em;font-weight:400;color:#6e87a8;background:#0c1525}th,td{padding:13px 19px;border-top:1px solid #1f2e43}td:first-child{font:10px var(--mono);color:#a4c0df;max-width:220px;overflow-wrap:anywhere}td:last-child{font:10px var(--mono);color:#8da4c1}td:nth-child(2){color:#d3dfef}.row-type{display:inline-block;background:#182b39;border:1px solid #28444e;padding:2px 6px;border-radius:3px;font:8px var(--mono);color:#86cbbd}
+    .storage-section{padding-block:82px 76px;border-bottom:1px solid var(--line)}.storage-story{display:grid;grid-template-columns:1fr 1fr;gap:75px;align-items:center}.storage-copy>p:last-child{font-size:14px;line-height:1.9;color:#99adc8;max-width:440px;margin-top:23px}.storage-copy strong{font-weight:450;color:#d5e4f4}.separation-card{padding:25px;border:1px solid #2c4058;border-radius:8px;background:linear-gradient(145deg,#111f33,#0c1626)}.separation-label{font:9px var(--mono);letter-spacing:.09em;color:#859fbd;margin-bottom:21px}.compute-boxes{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.compute-box{padding:14px 11px;border:1px solid #344d66;border-radius:4px;color:#d0e0f3;font-size:12px;line-height:1.5}.compute-box span{display:block;font:8px/1.6 var(--mono);color:#7f9ab9;margin-top:5px}.compute-box:last-child{border-style:dashed;border-color:#4b8c81;color:var(--accent)}.storage-connectors{height:36px;margin-inline:16%;border-inline:1px solid #3b5a6d;border-bottom:1px solid #3b5a6d;position:relative}.storage-connectors::before{content:"";position:absolute;left:50%;height:49px;border-left:1px solid #3b5a6d}.shared-storage{border:1px solid #539d8d;border-radius:4px;background:#14302f;padding:16px 18px;margin-top:13px;text-align:center}.shared-storage strong{font-size:14px;font-weight:500;color:#c6efdf}.shared-storage span{display:block;font:9px/1.7 var(--mono);color:#82bdad;margin-top:5px}.benefit-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:38px;margin-top:44px}.benefit h3{font-size:14px;font-weight:500;margin:0 0 9px;letter-spacing:-.1px}.benefit p{font-size:12px;line-height:1.85;color:#8fa6c4;margin:0}.storage-note{font:9px/1.8 var(--mono);color:#6d87a6;margin:26px 0 0}.boundaries{display:grid;grid-template-columns:1fr 1fr;gap:0;border-block:1px solid var(--line)}.boundary{padding:35px 38px 35px 0}.boundary+.boundary{padding-left:38px;border-left:1px solid var(--line)}.boundary .icon{font:16px var(--mono);color:var(--accent)}.boundary h3{font-size:20px;font-weight:500;letter-spacing:-.5px;margin:13px 0 11px}.boundary p{max-width:450px;font-size:13px;line-height:1.85;color:#91a6c2;margin:0}.boundary em{font-style:normal;color:#d6e3f3}
+    .api-section{display:grid;grid-template-columns:.8fr 1.2fr;gap:75px;align-items:start}.api-copy>p{font-size:14px;color:#91a5c0;line-height:1.85;max-width:330px;margin:22px 0 28px}.api-features{display:flex;gap:9px;flex-wrap:wrap;max-width:340px;margin:24px 0}.api-features span{font:9px var(--mono);border:1px solid #2a3c53;color:#a5bcd6;padding:7px 9px;border-radius:4px}.code-card{min-width:0;border:1px solid #2c3d54;border-radius:8px;overflow:hidden;background:#0d1728}.code-heading{display:flex;justify-content:space-between;align-items:center;padding:16px 20px;border-bottom:1px solid #293b52;font:10px var(--mono);color:#9fb6d2}.copy-code{font:9px var(--mono);padding:5px 9px;border:1px solid #3c536e;background:transparent;color:#b5cce7;border-radius:3px;min-width:56px}.code-card pre{font:11px/1.95 var(--mono);overflow:auto;padding:23px 24px;margin:0;color:#c2d4ed;tab-size:2}.code-comment{color:#6c86a8}.api-foot{border-top:1px solid #24374e;padding:14px 20px;color:#7892b2;font-size:10px}.byte-line{margin-top:20px;font:11px/1.8 var(--mono);color:#a4b9d5;overflow-wrap:anywhere}.byte-line span{color:var(--accent)}
+    .closing{padding:48px 0 61px;border-top:1px solid #2a3b52;display:flex;justify-content:space-between;align-items:center;gap:30px}.closing h2{margin:0;font-size:31px;letter-spacing:-1px}.closing p{font-size:12px;color:#829ab9;margin:9px 0 0}.closing-actions{display:flex;gap:23px;align-items:center}.footer{border-top:1px solid #1e2d42;padding:26px 0;display:flex;justify-content:space-between;gap:20px;font:9px/1.7 var(--mono);color:#6e85a3}.footer a:hover{color:var(--accent)}.footer-links{display:flex;gap:23px}.error{color:#ffc19b!important}.noscript{padding:16px;background:#152a38;color:#c8e4e0;font-size:13px}[hidden]{display:none!important}
+    @media(min-width:1500px){.hero{padding-block:108px 90px}.hero h1{font-size:72px}.map-card{margin-top:12px}}
+    @media(max-width:1080px){.wrap{width:calc(100% - 64px)}.hero{gap:30px}.hero h1{font-size:55px;letter-spacing:-2.8px}.hero .lead{font-size:15px}.node{font-size:10px;padding-inline:7px}.node span{font-size:8px}.map-head{padding-inline:18px}.network{margin-inline:15px}.api-section{gap:42px}.section-top>p{max-width:320px}.variant-index{display:none}.response{padding:23px 20px}.hero .actions{gap:18px}.hero .text-link{font-size:12px}}
+    @media(max-width:800px){.wrap{width:calc(100% - 48px)}.site-header{height:79px}nav{gap:20px}nav .nav-system{display:none}.hero{grid-template-columns:1fr;padding:58px 0 48px;gap:43px}.hero h1{font-size:62px;max-width:680px}.hero .lead{max-width:510px;font-size:16px}.hero-art{max-width:600px;width:100%}.network{height:270px}.node{font-size:12px}.node span{font-size:9px}.capabilities{gap:20px}.capability{gap:10px}.capability p{font-size:10px}.section{padding-block:67px}.section-top{align-items:start;gap:20px}h2{font-size:35px}.section-top>p{font-size:12px;max-width:260px}.console-body{grid-template-columns:1fr}.request{border-right:0;border-bottom:1px solid #28374d}.response{min-height:335px}.response pre{min-height:100px}.export-copy{max-width:420px}.api-section{grid-template-columns:1fr;gap:30px}.api-copy>p{max-width:520px}.api-features{max-width:none}.closing{gap:20px}.closing h2{font-size:27px}.closing-actions{gap:15px}.closing .text-link{display:none}.boundary{padding-right:24px}.boundary+.boundary{padding-left:24px}}
+    @media(max-width:480px){.wrap{width:calc(100% - 36px)}.site-header{height:74px}.brand{font-size:23px;gap:9px}.brand svg{width:26px;height:29px}nav{gap:17px}nav>a:not(.nav-source){display:none}.nav-source{padding:7px 11px;font-size:11px}.hero{padding-top:42px;gap:35px}.hero h1{font-size:48px;line-height:1.1;letter-spacing:-2.55px;margin-top:19px}.eyebrow{font-size:8px;letter-spacing:.11em}.hero .lead{font-size:14px;line-height:1.85}.actions{gap:18px}.button{padding:11px 14px;font-size:11px;gap:16px}.text-link{font-size:11px}.hero-note{font-size:9px}.map-head{padding:16px}.map-head strong{font-size:10px}.map-head .tag{font-size:8px}.map-tabs{padding:14px 14px 0}.map-tabs button{padding:7px 12px}.network{height:auto;display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:17px 15px 20px}.wires{display:none}.node{position:static;width:auto;min-height:67px;font-size:11px;padding:12px}.node-store{grid-column:1/-1;display:flex;flex-direction:row;align-items:center;justify-content:space-between;min-height:56px;padding-inline:15px}.node-store span{margin:0;font-size:9px}.node-client{order:0}.node-gateway{order:1}.node-writer{order:2}.node-reader{order:3}.node-store{order:4}.node-detail{font-size:10px;padding:15px 17px;min-height:84px}.map-caption{font-size:8px;gap:8px}.capabilities{grid-template-columns:1fr;padding-block:23px;gap:17px}.capability{align-items:center;gap:17px}.capability strong{font-size:12px}.capability p{font-size:11px}.capability .index{font-size:9px}.section{padding-block:54px}.section-top{display:block;margin-bottom:25px}h2{font-size:34px;letter-spacing:-1.4px}.section-top>p{max-width:310px;margin-top:19px;font-size:12px}.console-bar{padding:14px 16px;gap:10px}.console-title{font-size:9px}.demo-label{font-size:8px}.request{padding:20px 17px}.request-tabs{margin-bottom:21px}.request-tabs button{padding:8px 14px}.form-grid{gap:11px}.field input,.field select,.field textarea{font-size:10px;padding:9px;min-width:0}.field label{font-size:9px}.form-note{font-size:9px;max-width:150px}.run-row{gap:13px}.response{padding:22px 17px;min-height:330px}.response pre{font-size:10px;line-height:1.9}.export-bar{display:block;padding:18px 17px}.export-copy{font-size:10px}.advance{margin-top:15px;font-size:9px}.demo-foot{font-size:9px;gap:14px;align-items:start}.demo-foot button{font-size:9px}.dataset{margin-top:22px}.dataset-head{padding:13px 14px}.dataset-head strong{font-size:9px}.dataset-head span{font-size:8px}th,td{padding:12px 13px}table{min-width:410px}.boundaries{grid-template-columns:1fr}.boundary,.boundary+.boundary{padding:27px 0;border-left:0}.boundary+.boundary{border-top:1px solid var(--line)}.boundary h3{font-size:19px}.boundary p{font-size:12px}.api-copy>p{font-size:13px}.api-features{gap:7px}.api-features span{font-size:8px}.code-card pre{font-size:9px;padding:19px 16px}.code-heading{padding-inline:16px;font-size:9px}.api-foot{font-size:9px;padding-inline:16px}.closing{padding:34px 0;display:block}.closing h2{font-size:27px}.closing p{font-size:11px}.closing-actions{margin-top:22px}.footer{font-size:8px;display:block}.footer-links{margin-top:13px;gap:19px}.byte-line{font-size:10px}}
+    @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{transition:none!important;animation:none!important}.button:hover{transform:none}}
+    @media(max-width:800px){.storage-section{padding-block:60px}.storage-story{grid-template-columns:1fr;gap:28px}.storage-copy>p:last-child{max-width:540px}.separation-card{max-width:600px}.benefit-grid{gap:24px;margin-top:32px}}
+    @media(max-width:480px){.storage-section{padding-block:48px}.storage-copy>p:last-child{font-size:12px}.separation-card{padding:18px 15px}.separation-label{font-size:8px}.compute-boxes{gap:8px}.compute-box{font-size:11px;padding:11px 9px}.compute-box span{font-size:8px}.shared-storage strong{font-size:12px}.shared-storage span{font-size:8px}.benefit-grid{grid-template-columns:1fr;gap:22px}.benefit h3{font-size:13px}.benefit p{font-size:12px}.storage-note{font-size:8px}}
+  </style>
+<link rel="stylesheet" href="../assets/syntax.css"><script src="../assets/prism.js" defer></script><script src="../assets/syntax.js" defer></script></head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header wrap">
+    <a class="brand" href="../" aria-label="Rockbee home"><svg viewBox="0 0 32 36" aria-hidden="true"><path d="m16 2 13 7.5v16L16 33 3 25.5v-16Z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="m9 12 7-4 7 4v7l-7 4-7-4Z" fill="currentColor"/><path d="m9 24 7 4 7-4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>Rockbee</a>
+    <nav aria-label="Main navigation"><a class="nav-system" href="#system">The system</a><a href="#api">Rust API</a><span class="variant-index">CONTROL ROOM / 03</span><a class="nav-source" href="https://github.com/umit/rockbee">View source <span aria-hidden="true">↗</span></a></nav>
+  </header>
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow">Shared storage. Independent compute.</p>
+        <h1 id="hero-title">One durable core.<br><span>Independent<br>readers.</span></h1>
+        <p class="lead"><strong>Durable bytes. Flexible JSON. Real SQL.</strong> A small Rust API in front of SlateDB and shared object storage. Write through one writer. Serve reads independently.</p>
+        <div class="actions"><a class="button" href="#console">Explore a request <span aria-hidden="true">↗</span></a><a class="text-link" href="#api">Meet RockBeeClient</a></div>
+        <p class="hero-note"><span>Rust + SlateDB + DuckDB</span><br>One writer per storage prefix. Eventual read visibility.</p>
+      </div>
+      <div class="hero-art" id="system">
+        <div class="map-card">
+          <div class="map-head"><strong>FOLLOW THE DATA</strong><span class="tag">ARCHITECTURE / INTERACTIVE</span></div>
+          <div class="map-tabs" role="group" aria-label="Highlight request route"><button type="button" data-mode="put" aria-pressed="true">PUT</button><button type="button" data-mode="get" aria-pressed="false">GET</button><button type="button" data-mode="sql" aria-pressed="false">SQL</button></div>
+          <div class="network" aria-label="Interactive system map">
+            <svg class="wires" viewBox="0 0 500 265" preserveAspectRatio="none" aria-hidden="true">
+              <path class="wire wire-common" d="M98 138H141"/><path class="wire wire-put" d="M245 138H265V52H290"/><path class="wire wire-read" d="M245 138H265V225H290"/><path class="wire wire-put" d="M416 52H458V106"/><path class="wire wire-read" d="M458 170V225H416"/><path class="wire wire-sql async" d="M415 65H439V116H420"/>
+              <text class="wire-label" x="272" y="109">write</text><text class="wire-label" x="272" y="181">read</text><text class="wire-label" x="354" y="118">Parquet</text>
+            </svg>
+            <button class="node node-client route-on" type="button" data-node="client" aria-pressed="false">Rust client<span>RockBeeClient</span></button>
+            <button class="node node-gateway route-on" type="button" data-node="gateway" aria-pressed="false">Gateway<span>Request routing</span></button>
+            <button class="node node-writer route-on" type="button" data-node="writer" aria-pressed="false">One writer<span>SlateDB · durable ACK</span></button>
+            <button class="node node-reader" type="button" data-node="reader" aria-pressed="false">Independent readers<span>SlateDB GET · DuckDB SQL</span></button>
+            <button class="node node-store route-on" type="button" data-node="storage" aria-pressed="false">Object<br class="desktop-break"> storage<span>WAL · SST<br>Parquet</span></button>
+          </div>
+          <div class="node-detail" id="route-description" aria-live="polite"><b>PUT → durable acknowledgement.</b> The writer persists through SlateDB. Reader catch-up and Parquet publication happen afterwards.</div>
+        </div>
+        <p class="map-caption"><span>Click a role to inspect its responsibility.</span><span>Solid: request path · dashed: async export</span></p>
+      </div>
+    </section>
+
+    <div class="capabilities wrap" aria-label="Three storage interfaces">
+      <div class="capability"><span class="index">01</span><div><strong>Opaque byte storage</strong><p>PUT, GET, DELETE. Your keys. Your values.</p></div></div>
+      <div class="capability"><span class="index">02</span><div><strong>Schema-free JSON tables</strong><p>Flexible fields, generated UUIDs, caller IDs, TTL.</p></div></div>
+      <div class="capability"><span class="index">03</span><div><strong>DuckDB SQL over Parquet</strong><p>Real SELECTs on a published table view.</p></div></div>
+    </div>
+
+    <section class="storage-section wrap" aria-labelledby="storage-title">
+      <div class="storage-story">
+        <div class="storage-copy"><p class="eyebrow">Disaggregated by design</p><h2 id="storage-title">Add read compute.<br>Keep data in place.</h2><p><strong>Serving compute and durable storage are separate.</strong> One writer and independent readers open the same dataset in shared object storage. Plan storage for dataset size; plan reader compute for serving demand.</p></div>
+        <div class="separation-card" role="img" aria-label="One writer, a reader, and an additional reader connect to the same shared object store. Each reader has its own cache.">
+          <div class="separation-label">SERVING COMPUTE / CONFIGURE INDEPENDENTLY</div>
+          <div class="compute-boxes"><div class="compute-box">Writer<span>Durable mutations</span></div><div class="compute-box">Reader<span>Own local cache</span></div><div class="compute-box">+ Reader<span>Same storage prefix</span></div></div>
+          <div class="storage-connectors" aria-hidden="true"></div>
+          <div class="shared-storage"><strong>One shared durable dataset</strong><span>Object storage · SlateDB WAL + SST · published Parquet</span></div>
+        </div>
+      </div>
+      <div class="benefit-grid">
+        <article class="benefit"><h3>Provision readers for traffic.</h3><p>Configure another reader against the same storage prefix as serving demand changes. The durable dataset stays in shared object storage.</p></article>
+        <article class="benefit"><h3>Cache hot data. Share the full dataset.</h3><p>A reader does not need its own independent full durable replica. It keeps a local cache and fetches data from the shared store when needed.</p></article>
+        <article class="benefit"><h3>Keep the read paths explicit.</h3><p>GET uses a SlateDB reader. SQL uses DuckDB over the immutable Parquet projection published in the background. Both paths are eventual.</p></article>
+      </div>
+      <p class="storage-note">New readers need catch-up and cache warmup. Cold reads use object storage; throughput and cost depend on the workload.</p>
+    </section>
+
+    <section class="section wrap" id="console" aria-labelledby="console-title">
+      <div class="section-top"><div><p class="eyebrow">The request console</p><h2 id="console-title">Know what happens<br>after you hit write.</h2></div><p>A durable acknowledgement is one boundary. Reader visibility is another. Walk through both with a tiny product catalog.</p></div>
+      <noscript><p class="noscript">This illustrative console needs JavaScript. The architecture and Rust API below remain available without it.</p></noscript>
+      <div class="console">
+        <div class="console-bar"><span class="console-title">TABLE / products</span><span class="demo-label">ILLUSTRATIVE BROWSER MODEL</span></div>
+        <div class="console-body">
+          <form class="request" id="request-form">
+            <div class="request-tabs" role="group" aria-label="Choose illustrative request"><button type="button" data-mode="put" aria-pressed="true">PUT</button><button type="button" data-mode="get" aria-pressed="false">GET</button><button type="button" data-mode="sql" aria-pressed="false">SQL</button></div>
+            <div class="request-panel" id="put-panel">
+              <span class="pane-label">STORE A JSON DOCUMENT</span>
+              <div class="form-grid"><div class="field"><label for="id-mode">Document ID</label><select id="id-mode"><option value="caller">Use a caller ID</option><option value="auto">Generate a UUID</option></select></div><div class="field"><label for="put-id">Caller ID</label><input id="put-id" value="field-keyboard" autocomplete="off" maxlength="80"></div></div>
+              <div class="field document-field"><label for="document">JSON object · fields can vary by document</label><textarea id="document" spellcheck="false" aria-describedby="json-help">{
+  "name": "Field keyboard",
+  "price": 129,
+  "stock": 12
+}</textarea></div>
+              <div class="form-grid"><div class="field"><label for="ttl">Document expiry</label><select id="ttl"><option value="0">No TTL</option><option value="60">60 seconds</option><option value="3600">1 hour</option></select></div><div class="field"><label>Namespace</label><input value="products" disabled aria-label="Demo table products"></div></div>
+              <p class="ttl-note" id="json-help">Update a known ID or generate a new one. Only this browser model changes.</p>
+            </div>
+            <div class="request-panel" id="get-panel" hidden><span class="pane-label">LOOK UP A DOCUMENT</span><div class="field"><label for="get-id">Document ID</label><input id="get-id" value="field-keyboard" autocomplete="off" maxlength="80"></div><pre class="sql-text">products.get("field-keyboard").await?</pre><p class="muted" style="font-size:12px;line-height:1.9">GET goes to a SlateDB reader. A durable PUT may still read as an older value until that reader catches up.</p></div>
+            <div class="request-panel" id="sql-panel" hidden><span class="pane-label">QUERY THE PUBLISHED TABLE</span><div class="field"><label for="price-limit">Show products priced below</label><select id="price-limit"><option value="150">$150</option><option value="100">$100</option><option value="250">$250</option><option value="1000">$1,000</option></select></div><pre class="sql-text" id="demo-sql">SELECT id, value FROM products
+WHERE TRY_CAST(value-&gt;&gt;'price'
+  AS DOUBLE) &lt; 150</pre><p class="muted" style="font-size:12px;line-height:1.9">Real SQL runs in reader-side DuckDB over published Parquet. This illustration models the selected filter in JavaScript.</p></div>
+            <div class="run-row"><button class="button" type="submit" id="run-request">Trace PUT <span aria-hidden="true">→</span></button><span class="form-note" id="run-note">Durable ACK comes before reader and SQL visibility.</span></div>
+          </form>
+          <div class="response">
+            <div class="response-top"><span class="pane-label" style="margin:0">RESPONSE / LOCAL ILLUSTRATION</span><span id="response-kind">READY TO TRACE</span></div>
+            <pre id="response-output" tabindex="0" aria-label="Illustrative response" aria-live="polite">{
+  "table": "products",
+  "next": "trace a PUT, GET, or SQL request"
+}</pre>
+            <ol class="trace" id="trace-steps" aria-label="Selected request path"><li>RockBeeClient</li><li>Gateway</li><li>Writer</li><li>SlateDB → durable ACK</li></ol>
+            <p class="response-note" id="response-note">Try changing the keyboard price, then trace PUT. Inspect GET and SQL before advancing the asynchronous steps.</p>
+          </div>
+        </div>
+        <div class="export-bar"><div class="export-copy" aria-live="polite"><strong id="export-title">Reader and published view start with the same fixture.</strong><span id="export-note">After a PUT, advance reader catch-up and Parquet publication separately.</span></div><button class="advance" id="advance" type="button" disabled>No pending changes</button></div>
+      </div>
+      <div class="demo-foot"><span>No server requests. No live cluster. The browser model makes visibility boundaries explicit.</span><button type="button" id="reset-demo">Reset illustration ↺</button></div>
+      <div class="dataset"><div class="dataset-head"><strong>DATA PREVIEW / PUBLISHED PARQUET VIEW</strong><span id="dataset-count">2 documents</span></div><div class="table-scroll" role="region" aria-label="Published illustrative dataset" tabindex="0"><table><thead><tr><th scope="col">ID</th><th scope="col">NAME</th><th scope="col">PRICE</th><th scope="col">EXTRA FIELD</th></tr></thead><tbody id="dataset-body"><tr><td>field-keyboard</td><td>Field keyboard</td><td>$159</td><td><span class="row-type">stock: 8</span></td></tr><tr><td>studio-lamp</td><td>Studio lamp</td><td>$89</td><td><span class="row-type">color: sage</span></td></tr></tbody></table></div></div>
+    </section>
+
+    <section class="boundaries wrap" aria-label="Consistency and durability boundaries">
+      <article class="boundary"><span class="icon" aria-hidden="true">↳</span><h3>Success means durable.</h3><p>PUT and DELETE are acknowledged after SlateDB confirms durability. The writer does <em>not wait for Parquet publication</em>. If a mutation's outcome is uncertain, Rockbee does not automatically replay it.</p></article>
+      <article class="boundary"><span class="icon" aria-hidden="true">⇢</span><h3>Visibility is eventual.</h3><p>Readers follow independently. SQL adds a second asynchronous boundary: <em>published Parquet</em>. Query results include an exported WAL watermark, so the published position is explicit.</p></article>
+    </section>
+
+    <section class="section wrap api-section" id="api" aria-labelledby="api-title">
+      <div class="api-copy"><p class="eyebrow">The Rust interface</p><h2 id="api-title">Small surface.<br>Useful primitives.</h2><p>Keep familiar byte operations. Add JSON documents without defining a table schema. Use SQL when a key lookup is not enough.</p><div class="api-features"><span>Generated UUIDs</span><span>Caller IDs</span><span>Document TTL</span><span>Bounded multiplexing</span></div><a class="text-link" href="https://github.com/umit/rockbee#use-the-rust-rockbeeclient">Read the client guide <span aria-hidden="true">↗</span></a><p class="byte-line"><span>Bytes, too.</span><br>client.put(key, value).await?;<br>client.get(key).await?;<br>client.delete(key).await?;</p></div>
+      <div class="code-card"><div class="code-heading"><span>RUST / RockBeeClient</span><button type="button" class="copy-code" id="copy-code" aria-label="Copy Rust JSON table example">Copy</button></div><pre tabindex="0" aria-label="Rust JSON table example"><code id="rust-example"><span class="syntax-purple">use</span> rockbee_client::RockBeeClient;
+<span class="syntax-purple">use</span> serde_json::json;
+
+<span class="syntax-purple">let</span> client = RockBeeClient::connect(
+    <span class="syntax-green">"127.0.0.1:7000"</span>
+).<span class="syntax-purple">await</span>?;
+<span class="syntax-purple">let</span> products = client.table(<span class="syntax-green">"products"</span>);
+
+<span class="code-comment">// Generate an ID. Await durable completion.</span>
+<span class="syntax-purple">let</span> id = products.put(&amp;json!({
+    <span class="syntax-green">"name"</span>: <span class="syntax-green">"Field keyboard"</span>, <span class="syntax-green">"price"</span>: 129
+})).<span class="syntax-purple">await</span>?;
+
+<span class="code-comment">// Or supply an ID; each document can differ.</span>
+products.put_key(<span class="syntax-green">"studio-lamp"</span>, &amp;json!({
+    <span class="syntax-green">"name"</span>: <span class="syntax-green">"Studio lamp"</span>, <span class="syntax-green">"color"</span>: <span class="syntax-green">"sage"</span>
+}), None).<span class="syntax-purple">await</span>?;
+
+<span class="syntax-purple">let</span> rows = products.query(
+    <span class="syntax-green">"SELECT id, value FROM products"</span>
+).<span class="syntax-purple">await</span>?;</code></pre><div class="api-foot">Generated UUIDs are available on the PUT handle before awaiting completion.</div></div>
+    </section>
+
+    <section class="closing wrap" aria-labelledby="closing-title"><div><h2 id="closing-title">Keep the data. Choose the compute.</h2><p>Inspect the design, run the examples, and explore the tradeoffs.</p></div><div class="closing-actions"><a class="text-link" href="../">Main website</a><a class="button" href="https://github.com/umit/rockbee">Explore Rockbee <span aria-hidden="true">↗</span></a></div></section>
+  </main>
+  <footer class="footer wrap"><span>ROCKBEE / STORAGE WITH EXPLICIT BOUNDARIES.</span><div class="footer-links"><a href="https://github.com/umit/rockbee">GitHub ↗</a><a href="./">Design collection ↗</a><a href="#main">Back to top ↑</a></div></footer>
+  <script>
+    (function () {
+      'use strict';
+      var mode = 'put', revision = 0, readerRevision = 0, publishedRevision = 0;
+      var writer, reader, published;
+      var $ = function (id) { return document.getElementById(id); };
+      var descriptions = {
+        put: '<b>PUT → durable acknowledgement.</b> The writer persists through SlateDB. Reader catch-up and Parquet publication happen afterwards.',
+        get: '<b>GET → a SlateDB reader.</b> The gateway routes lookups to independent readers. A reader can lag behind the writer.',
+        sql: '<b>SQL → DuckDB over published Parquet.</b> A reader queries an exported table view, without a fresh SlateDB scan per query.'
+      };
+      var roles = {
+        client: '<b>RockBeeClient.</b> The public Rust API for bytes, JSON tables, and queries. PUT handles start eagerly; generated IDs are available before completion.',
+        gateway: '<b>The routing boundary.</b> PUT and DELETE go to the writer. GET and SQL go to readers. The gateway keeps no separate key-value cache.',
+        writer: '<b>One writer per prefix.</b> SlateDB owns durable writes. A background exporter publishes immutable Parquet and a manifest independently of write acknowledgements.',
+        reader: '<b>Independent read-serving compute.</b> SlateDB serves lookups. DuckDB queries published Parquet. Readers can catch up and warm their caches at different times.',
+        storage: '<b>The durable core.</b> Shared object storage keeps SlateDB WAL and SST files, plus immutable Parquet objects and published manifests.'
+      };
+      function cloneMap(source) { return new Map(Array.from(source.entries()).map(function (item) { return [item[0], { value: Object.assign({}, item[1].value), expires: item[1].expires }]; })); }
+      function alive(entry) { return entry && (!entry.expires || entry.expires > Date.now()); }
+      function seed() {
+        writer = new Map([
+          ['field-keyboard', { value: { name: 'Field keyboard', price: 159, stock: 8 }, expires: null }],
+          ['studio-lamp', { value: { name: 'Studio lamp', price: 89, color: 'sage' }, expires: null }]
+        ]);
+        reader = cloneMap(writer); published = cloneMap(writer); revision = 0; readerRevision = 0; publishedRevision = 0;
+      }
+      function setMode(next) {
+        mode = next;
+        document.querySelectorAll('[data-mode]').forEach(function (button) { button.setAttribute('aria-pressed', String(button.dataset.mode === mode)); });
+        ['put', 'get', 'sql'].forEach(function (name) { $(name + '-panel').hidden = name !== mode; });
+        $('run-request').textContent = 'Trace ' + mode.toUpperCase() + '  →';
+        $('run-note').textContent = mode === 'put' ? 'Durable ACK comes before reader and SQL visibility.' : mode === 'get' ? 'This reads the reader model, not the writer.' : 'This reads the published model, not the writer.';
+        document.querySelectorAll('[data-node]').forEach(function (button) {
+          var active = ['client', 'gateway', 'storage'].indexOf(button.dataset.node) !== -1 || (mode === 'put' ? button.dataset.node === 'writer' : button.dataset.node === 'reader');
+          button.classList.toggle('route-on', active); button.setAttribute('aria-pressed', 'false');
+        });
+        document.querySelectorAll('.wire').forEach(function (wire) { wire.classList.toggle('active', wire.classList.contains('wire-common') || (mode === 'put' && wire.classList.contains('wire-put')) || (mode !== 'put' && wire.classList.contains('wire-read')) || (mode === 'sql' && wire.classList.contains('wire-sql'))); });
+        $('route-description').innerHTML = descriptions[mode];
+        var steps = mode === 'put' ? ['RockBeeClient', 'Gateway', 'Writer', 'SlateDB → durable ACK'] : mode === 'get' ? ['RockBeeClient', 'Gateway', 'SlateDB reader', 'Document or miss'] : ['RockBeeClient', 'Gateway', 'Reader / DuckDB', 'Published Parquet'];
+        $('trace-steps').replaceChildren.apply($('trace-steps'), steps.map(function (text) { var li = document.createElement('li'); li.textContent = text; return li; }));
+      }
+      function output(kind, value, note, error) {
+        $('response-kind').textContent = kind;
+        $('response-output').textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+        $('response-output').classList.toggle('error', !!error);
+        $('response-note').textContent = note;
+      }
+      function updateExport() {
+        var advance = $('advance');
+        if (readerRevision < revision) {
+          advance.disabled = false; advance.textContent = '1 / Advance reader →';
+          $('export-title').textContent = 'Durable in the writer. Read paths can still lag.';
+          $('export-note').textContent = 'First let the SlateDB reader catch up. SQL will still use the previous Parquet view.';
+        } else if (publishedRevision < readerRevision) {
+          advance.disabled = false; advance.textContent = '2 / Publish Parquet →';
+          $('export-title').textContent = 'The reader has caught up. SQL has a separate publication boundary.';
+          $('export-note').textContent = 'Publish the illustrative Parquet view, then trace SQL again.';
+        } else {
+          advance.disabled = true; advance.textContent = 'No pending changes';
+          $('export-title').textContent = revision ? 'Reader and published view include this model’s latest write.' : 'Reader and published view start with the same fixture.';
+          $('export-note').textContent = 'In the real system these steps run asynchronously. This model lets you advance them by hand.';
+        }
+      }
+      function renderDataset() {
+        var entries = Array.from(published.entries()).filter(function (entry) { return alive(entry[1]); });
+        var rows = entries.map(function (entry) {
+          var tr = document.createElement('tr'), value = entry[1].value;
+          var extra = Object.keys(value).find(function (key) { return key !== 'name' && key !== 'price'; });
+          [entry[0], value.name == null ? '—' : String(value.name), typeof value.price === 'number' ? '$' + value.price : '—', extra ? extra + ': ' + JSON.stringify(value[extra]) : '—'].forEach(function (text, index) {
+            var td = document.createElement('td');
+            if (index === 3) { var label = document.createElement('span'); label.className = 'row-type'; label.textContent = text; td.append(label); } else td.textContent = text;
+            tr.append(td);
+          });
+          return tr;
+        });
+        if (!rows.length) { var tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan = 4; td.textContent = 'No unexpired documents in the published model.'; tr.append(td); rows.push(tr); }
+        $('dataset-body').replaceChildren.apply($('dataset-body'), rows);
+        $('dataset-count').textContent = entries.length + (entries.length === 1 ? ' document' : ' documents');
+      }
+      function uuid() {
+        if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+        var bytes = new Uint8Array(16); window.crypto.getRandomValues(bytes); bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+        var hex = Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, '0'); }).join('');
+        return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20);
+      }
+      document.querySelectorAll('[data-mode]').forEach(function (button) { button.addEventListener('click', function () { setMode(button.dataset.mode); }); });
+      document.querySelectorAll('[data-node]').forEach(function (button) { button.addEventListener('click', function () {
+        document.querySelectorAll('[data-node]').forEach(function (other) { other.setAttribute('aria-pressed', String(other === button)); });
+        $('route-description').innerHTML = roles[button.dataset.node];
+      }); });
+      $('id-mode').addEventListener('change', function () { $('put-id').disabled = this.value === 'auto'; });
+      $('price-limit').addEventListener('change', function () { $('demo-sql').textContent = "SELECT id, value FROM products\nWHERE TRY_CAST(value->>'price'\n  AS DOUBLE) < " + this.value; });
+      $('request-form').addEventListener('submit', function (event) {
+        event.preventDefault();
+        try {
+          if (mode === 'put') {
+            var value = JSON.parse($('document').value);
+            if (value === null || Array.isArray(value) || typeof value !== 'object') throw new Error('Use a JSON object for a table document.');
+            var id = $('id-mode').value === 'auto' ? uuid() : $('put-id').value.trim();
+            if (!id) throw new Error('Enter a caller ID or choose a generated UUID.');
+            if (!writer.has(id) && writer.size >= 8) throw new Error('This small illustration supports 8 documents. Reset it to explore again.');
+            var ttl = Number($('ttl').value);
+            writer.set(id, { value: value, expires: ttl ? Date.now() + ttl * 1000 : null }); revision++;
+            $('get-id').value = id;
+            output('DURABLE ACK · MODEL', { id: id, acknowledged: 'durable', reader_visibility: 'eventual', sql_visibility: 'after publication' }, 'The real SDK returns success after durable completion. This model leaves GET and SQL unchanged until you advance their separate steps.');
+          } else if (mode === 'get') {
+            var readId = $('get-id').value.trim(), entry = reader.get(readId);
+            if (!readId) throw new Error('Enter a document ID to look up.');
+            output('READER GET · MODEL', { id: readId, value: alive(entry) ? entry.value : null }, readerRevision < revision ? 'The reader is still behind this model’s writer. Advance the reader and trace GET again.' : 'This model’s reader has caught up. TTL can still make a document absent.');
+          } else {
+            var limit = Number($('price-limit').value);
+            var rows = Array.from(published.entries()).filter(function (entry) { return alive(entry[1]) && typeof entry[1].value.price === 'number' && entry[1].value.price < limit; }).map(function (entry) { return { id: entry[0], value: entry[1].value }; });
+            output('PUBLISHED SQL VIEW · MODEL', { rows: rows, note: 'Illustrative browser filter, not DuckDB execution' }, publishedRevision < revision ? 'SQL still sees the older published model. Reader GET may already be newer. Advance Parquet publication to include this write.' : 'This model’s published view is current. Real query responses also include the exported WAL watermark.');
+          }
+          updateExport(); renderDataset();
+        } catch (error) { output('CHECK THE REQUEST', error.message, 'The illustration has not sent any network request.', true); }
+      });
+      $('advance').addEventListener('click', function () {
+        if (readerRevision < revision) { reader = cloneMap(writer); readerRevision = revision; output('READER CAUGHT UP · MODEL', { reader: 'updated', sql: 'previous published view' }, 'Trace GET to inspect the newer document. Publish Parquet separately before SQL can include it.'); }
+        else if (publishedRevision < readerRevision) { published = cloneMap(reader); publishedRevision = readerRevision; output('PARQUET PUBLISHED · MODEL', { published_view: 'updated', table: 'products' }, 'Trace SQL to filter the updated published model. In Rockbee, the exporter uploads files before publishing its manifest.'); }
+        updateExport(); renderDataset();
+      });
+      $('reset-demo').addEventListener('click', function () {
+        seed(); $('document').value = '{\n  "name": "Field keyboard",\n  "price": 129,\n  "stock": 12\n}'; $('put-id').value = 'field-keyboard'; $('get-id').value = 'field-keyboard'; $('id-mode').value = 'caller'; $('put-id').disabled = false; $('ttl').value = '0'; $('price-limit').value = '150'; $('price-limit').dispatchEvent(new Event('change'));
+        setMode('put'); updateExport(); renderDataset(); output('READY TO TRACE', { table: 'products', next: 'trace a PUT, GET, or SQL request' }, 'The two-document fixture is restored. Change a value and explore the visibility boundaries.');
+      });
+      $('copy-code').addEventListener('click', async function () {
+        var button = this;
+        try { if (!navigator.clipboard) throw new Error('Clipboard unavailable'); await navigator.clipboard.writeText($('rust-example').textContent); button.textContent = 'Copied'; }
+        catch (_) { button.textContent = 'Select code'; $('rust-example').parentElement.focus(); }
+        window.setTimeout(function () { button.textContent = 'Copy'; }, 2200);
+      });
+      seed(); setMode('put'); updateExport(); renderDataset();
+      window.setInterval(renderDataset, 1000);
+    }());
+  </script>
+</body>
+</html>

@@ -5,11 +5,24 @@ verification. Roles describe responsibilities; they do not create persistent
 agents, confer expertise, or imply that different models are running.
 Root `AGENTS.md` remains authoritative. Superpowers is disabled.
 
+When the user chooses Herdr, use [the Herdr integration](herdr.md). The existing
+project `Main` is the Engineering Lead; these same roles remain authoritative.
+Use one execution mode per task, with visible Herdr helpers in Herdr mode.
+Keep `Main` for the Engineering Lead and use separate role-named tabs for
+assigned helpers; do not split their sessions inside `Main`.
+All Rockbee roles use the user-selected GPT-6-Astra model with ultra reasoning
+and fast mode; follow the launch policy in the Herdr integration guide.
+
 ## Project interface and intake
 
 The Engineering Lead is the user's single entry point. Understand the requested
 outcome, carry forward earlier constraints, and route the work; the user should
 not need to pick agents or repeat the project history.
+
+Every agent answers in the language of the user's question, including progress
+updates and final responses visible in Herdr. The language of an internal task
+assignment does not override the user's language; pass that language explicitly
+to helpers. Keep code identifiers and all content under `.agents/` in English.
 
 Identify the task type, affected product/workspace, existing authorization,
 acceptance evidence, and any missing information that materially changes the
@@ -49,7 +62,7 @@ Database Architect, and the Technical Arbiter is different from both. Schedule t
 ## Choose the team for the task
 
 Use subagents for engineering work, but do not activate every role for every task.
-A Engineering Lead acting as Software Engineer plus one independent Verification Engineer is sufficient
+An Engineering Lead acting as Software Engineer plus one independent Verification Engineer is sufficient
 for a localized change. Multiple roles need not mean multiple simultaneous agents.
 
 | Task | Working arrangement |
